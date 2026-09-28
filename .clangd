@@ -17,11 +17,23 @@ CompileFlags:
     - -msmall-data-limit=0
     - -msave-restore
     - -flto
+  # PlatformIO не переносит в compile_commands.json неявные пути поиска
+  # заголовков самого компилятора, а это единственное место, где лежат
+  # <stdio.h>, <stdint.h>, <stddef.h>. Без них clangd не находит libc и
+  # сыплет 'file not found' (и каскадом — ошибки на printf).
+  # Пути машинозависимые: при другой установке PlatformIO поправьте их здесь
+  # или удалите строки, если clangd уже видит системные заголовки.
+  Add:
+    - -IC:/Users/tamag/.platformio/packages/toolchain-riscv/lib/gcc/riscv-wch-elf/12.2.0/include
+    - -IC:/Users/tamag/.platformio/packages/toolchain-riscv/riscv-wch-elf/include
 
 Diagnostics:
   # Целевые регистры RISC-V и WCH-специфичные атрибуты в SDK-заголовках не имеют
   # смысла для нативного clang — не засоряют вывод.
+  # anyx86_interrupt_attribute: __attribute__((interrupt("WCH-Interrupt-fast")))
+  # описывает вектор QingKe, нативный clang считает целевой платформой x86.
   Suppress:
     - target-specific-option
     - unknown-warning-option
+    - anyx86_interrupt_attribute
     - -Wunknown-attributes

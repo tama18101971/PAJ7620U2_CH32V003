@@ -159,7 +159,7 @@ C projects need an LSP backend; without one the symbol tools
   `GPIO_EXTILineConfig()`; otherwise the EXTI mapping is silently ignored.
 - The EXTI ISR in `paj_int_config.c` is intentionally **strong**: the
   NoneOS-SDK weak fallback handler is an infinite loop.
-- Reference sizes (examples/basic, LTO on): RAM 508 B, Flash 10792 B. The
+- Reference sizes (examples/basic, LTO on): RAM 508 B, Flash 10804 B. The
   driver itself is ~1.5 KB of flash and 15 bytes of static RAM.
 
 ## Datasheet sources

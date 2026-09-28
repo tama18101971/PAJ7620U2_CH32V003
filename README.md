@@ -164,7 +164,7 @@ pio run -t upload       # flash via WCH-Link
 pio run -t size         # firmware size
 ```
 
-Reference build of `examples/basic` (LTO on): **RAM 508 B, Flash 10792 B** of
+Reference build of `examples/basic` (LTO on): **RAM 508 B, Flash 10804 B** of
 2048 B RAM / 16384 B flash. CI (`.github/workflows/ci.yml`) builds nine
 configurations with `-Wextra -Werror` and enforces size ceilings.
 

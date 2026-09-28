@@ -35,5 +35,7 @@ Follows the sibling `APDS-9960_CH32V003` driver; keep the two diffable.
   `paj_exti_callback()` is the weak one.
 - Helper idioms in use: `ARRAY_LEN()` macro, Newton `isqrt`, insertion
   `sort_u8`, `delay-with-deadline` timebase on own SysTick.
-- No `printf` unless `PAJ7620U2_DEBUG`; it costs flash. `paj7620.c` still
-  includes `<stdio.h>` so the guard is a macro, not a header change.
+- No `printf` unless `PAJ7620U2_DEBUG`; it costs flash. `<stdio.h>` is included
+  **inside** `#ifdef PAJ7620U2_DEBUG` — an unconditional include makes clangd
+  report the header as unused (the project is expected to be clean under
+  `serena_get_diagnostics_for_file` with min_severity 2).

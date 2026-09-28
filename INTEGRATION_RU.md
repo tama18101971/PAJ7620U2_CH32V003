@@ -150,4 +150,4 @@ if (i2c_init(400000) == I2C_OK && CFG->on_gst) {
    распознаёт жесты (раздел 4).
 5. Сопоставить размер прошивки: при `-DPAJ_ENABLE_CALIBRATION=0` и без
    `printf` драйвер занимает ~1.5 КБ флэша и 15 байт RAM
-   (эталонная сборка `examples/basic` с LTO: RAM 508 Б, Flash 10792 Б).
+   (эталонная сборка `examples/basic` с LTO: RAM 508 Б, Flash 10804 Б).

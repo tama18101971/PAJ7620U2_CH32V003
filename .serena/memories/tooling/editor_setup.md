@@ -15,12 +15,23 @@ work. Three parts are needed together:
    `pio run -t compiledb`; git-ignored. Without it clangd has no WCH SDK
    include paths or `-DCH32V003F4/…` defines. 25 entries; our three sources
    are present with `directory` = project root.
-3. `.clangd` in the project root — **mandatory**. PlatformIO's DB carries
-   `-march=rv32ecxw -mabi=ilp32e -msmall-data-limit=0 -msave-restore -flto`;
-   native clang dies on "unknown target CPU 'rv32ecxw'" and then answers
-   `documentSymbol` with `invalid AST (-32001)`, i.e. zero symbols. The file
-   removes exactly those flags; the real build is unaffected. Same file also
-   serves VS Code cpptools and PIO IDE.
+3. `.clangd` in the project root — **mandatory**, two parts:
+   - `CompileFlags.Remove` of `-march=rv32ecxw -mabi=ilp32e
+     -msmall-data-limit=0 -msave-restore -flto`: native clang dies on
+     "unknown target CPU 'rv32ecxw'" and then answers `documentSymbol` with
+     `invalid AST (-32001)`, i.e. zero symbols;
+   - `CompileFlags.Add` of the toolchain's own include dirs
+     (`toolchain-riscv/lib/gcc/riscv-wch-elf/12.2.0/include` and
+     `toolchain-riscv/riscv-wch-elf/include`): PlatformIO does not copy the
+     compiler's implicit search paths into the DB, so without them clangd
+     cannot find `<stdio.h>`/`<stdint.h>` and reports 'file not found' plus a
+     cascade of "implicit declaration of printf".
+   The real firmware build is unaffected. The same file also serves VS Code
+   cpptools and PIO IDE. Paths are machine-specific — fix them locally if
+   PlatformIO lives elsewhere.
+   `Diagnostics.Suppress` additionally silences `anyx86_interrupt_attribute`:
+   `__attribute__((interrupt("WCH-Interrupt-fast")))` describes a QingKe vector
+   and only looks wrong to a native x86 clang.
 
 ## Lifecycle gotcha
 

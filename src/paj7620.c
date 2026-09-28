@@ -20,8 +20,13 @@
 #include "i2c.h"
 #include <stdint.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <debug.h>
+
+#ifdef PAJ7620U2_DEBUG
+/* printf используется только в отладочных ветках ниже; без PAJ7620U2_DEBUG
+ * заголовок не нужен и роняет -Wunused-подобные проверки clangd. */
+#include <stdio.h>
+#endif
 
 /* Количество элементов статического массива (uint8_t достаточно: таблицы
  * конфигурации короче 255 записей). */
@@ -500,11 +505,13 @@ static uint8_t isqrt(uint16_t n) {
     return (uint8_t)x;
 }
 
-/* Сортировка вставками для uint8_t (используется только при калибровке). */
+/* Сортировка вставками для uint8_t (используется только при калибровке).
+ * Индекс j — int16_t, а не int8_t: char-индекс даёт -Wchar-subscripts,
+ * а PAJ_CAL_SAMPLES ограничен 32, так что разрядности хватает с запасом. */
 static void sort_u8(uint8_t *arr, uint8_t n) {
     for (uint8_t i = 1; i < n; i++) {
-        uint8_t key = arr[i];
-        int8_t  j   = (int8_t)i - 1;
+        uint8_t  key = arr[i];
+        int16_t  j   = (int16_t)i - 1;
         while (j >= 0 && arr[j] > key) {
             arr[j + 1] = arr[j];
             j--;

@@ -206,7 +206,7 @@ pio run -t upload       # прошивка через WCH-Link
 pio run -t size         # размер прошивки
 ```
 
-Эталонная сборка `examples/basic` (LTO включён): **RAM 508 Б, Flash 10792 Б**
+Эталонная сборка `examples/basic` (LTO включён): **RAM 508 Б, Flash 10804 Б**
 при 2048 Б RAM / 16384 Б флэша. CI (`.github/workflows/ci.yml`) собирает
 девять конфигураций с `-Wextra -Werror` и проверяет потолки размера.
 
