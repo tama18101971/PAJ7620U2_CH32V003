@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            flags: ""
+          - name: polling
+            flags: "-DPAJ_INT_MODE=0"
+          - name: no-calibration
+            flags: "-DPAJ_ENABLE_CALIBRATION=0"
+          - name: debug-output
+            flags: "-DPAJ7620U2_DEBUG"
+          - name: external-exti-isr
+            flags: "-DPAJ_INT_MODE=1 -DPAJ_PROVIDE_EXTI_ISR=0"
+          - name: rotated-module
+            flags: "-DPAJ_GESTURE_ROTATE=2"
+          - name: proximity-demo
+            flags: "-DPAJ_EXAMPLE_PS_MODE=1"
+          - name: no-ps-mode
+            flags: "-DPAJ_ENABLE_PS_MODE=0"
+          - name: no-own-systick
+            flags: "-DPAJ_OWN_SYSTICK=0"
+    name: build (${{ matrix.name }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade platformio
+
+      # The 'ch32v' platform is not in the official PIO registry —
+      # install it from the Community-PIO-CH32V GitHub repository
+      # (same approach as the I2C-CH32V003 CI).
+      - name: Install ch32v platform
+        run: pio pkg install --platform https://github.com/Community-PIO-CH32V/platform-ch32v.git
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-platformio-${{ hashFiles('**/platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-platformio-
+
+      # PLATFORMIO_BUILD_SRC_FLAGS applies only to src/ and examples/, so
+      # -Werror does not fail on NoneOS-SDK or third-party library warnings.
+      - name: Build
+        env:
+          PLATFORMIO_BUILD_FLAGS: ${{ matrix.flags }}
+          PLATFORMIO_BUILD_SRC_FLAGS: "-Wextra -Werror"
+        run: pio run
+
+      - name: Report size
+        run: |
+          pio run --target size 2>&1 | tee size-${{ matrix.name }}.txt
+
+      - name: Upload size report
+        uses: actions/upload-artifact@v4
+        with:
+          name: size-${{ matrix.name }}
+          path: size-${{ matrix.name }}.txt
+
+  footprint-guard:
+    runs-on: ubuntu-latest
+    name: footprint guard (default config)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade platformio
+
+      - name: Install ch32v platform
+        run: pio pkg install --platform https://github.com/Community-PIO-CH32V/platform-ch32v.git
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: ${{ runner.os }}-platformio-${{ hashFiles('**/platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-platformio-
+
+      # Hard ceilings, not exact values: CH32V003F4P6 has 2048 B RAM / 16384 B
+      # flash. Bump these deliberately when a change is expected to grow the
+      # firmware, so unintended growth (e.g. accidental printf/float/64-bit
+      # helper pull-in) fails the build instead of silently eating headroom.
+      # Reference build (examples/basic, LTO on): RAM 508 B, Flash 10792 B.
+      - name: Build and check size ceilings
+        env:
+          PLATFORMIO_BUILD_SRC_FLAGS: "-Wextra -Werror"
+          MAX_RAM: "600"
+          MAX_FLASH: "13000"
+        run: |
+          pio run 2>&1 | tee build.log
+          RAM=$(grep -oP 'RAM:.*used \K[0-9]+' build.log)
+          FLASH=$(grep -oP 'Flash:.*used \K[0-9]+' build.log)
+          echo "RAM=${RAM} B (ceiling ${MAX_RAM}), Flash=${FLASH} B (ceiling ${MAX_FLASH})"
+          test -n "${RAM}" -a -n "${FLASH}" || { echo "could not parse size output"; exit 1; }
+          test "${RAM}" -le "${MAX_RAM}" || { echo "RAM ceiling exceeded"; exit 1; }
+          test "${FLASH}" -le "${MAX_FLASH}" || { echo "Flash ceiling exceeded"; exit 1; }

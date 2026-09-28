@@ -1,0 +1,33 @@
+{
+  "name": "PAJ7620U2_CH32V003",
+  "version": "1.0.0",
+  "description": "Gesture driver for PAJ7620U2 on CH32V003 (NoneOS-SDK)",
+  "frameworks": "noneos-sdk",
+  "platforms": "ch32v",
+  "keywords": "paj7620u2, gesture, proximity, ch32v003, risc-v, wch, i2c",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tama18101971/PAJ7620U2_CH32V003"
+  },
+  "dependencies": [
+    {
+      "name": "I2C-CH32V003",
+      "version": "https://github.com/tama18101971/I2C-CH32V003.git#v7.1.0"
+    }
+  ],
+  "build": {
+    "srcDir": "src"
+  },
+  "export": {
+    "exclude": [
+      "examples",
+      ".pio",
+      ".serena",
+      ".vscode",
+      ".github",
+      "docs",
+      "AGENTS.md"
+    ]
+  }
+}

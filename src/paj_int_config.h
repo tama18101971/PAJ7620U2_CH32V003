@@ -1,0 +1,96 @@
+#ifndef PAJ_INT_CONFIG_H
+#define PAJ_INT_CONFIG_H
+
+/*
+ * paj_int_config.h — Настройка внешнего прерывания PAJ7620U2 (INT → PC3)
+ *
+ * Использует EXTI_Line3 (PC3) с falling-edge триггером.
+ * Вывод INT датчика — open-drain, active-low: он опускается при
+ * распознавании жеста, разрешённого масками REG_INT1_EN/REG_INT2_EN
+ * (см. paj_enableInterrupt()).
+ * Все EXTI 0-7 на CH32V003 делят один вектор: EXTI7_0_IRQHandler.
+ *
+ * Распиновка совпадает с драйвером APDS-9960: PC1 = SDA, PC2 = SCL,
+ * PC3 = INT, поэтому плата переводится заменой датчика без правок схемы.
+ */
+
+#include <ch32v00x.h>
+#include <stdint.h>
+
+/* ============================================================================
+ * НАСТРОЙКА ПИНА INT (PAJ7620U2 → CH32V003)
+ * ============================================================================ */
+
+#ifndef PAJ_INT_PORT
+#define PAJ_INT_PORT           GPIOC
+#endif
+#ifndef PAJ_INT_PIN
+#define PAJ_INT_PIN            GPIO_Pin_3
+#endif
+#ifndef PAJ_INT_LINE
+#define PAJ_INT_LINE           EXTI_Line3
+#endif
+#ifndef PAJ_INT_PORT_SOURCE
+#define PAJ_INT_PORT_SOURCE    GPIO_PortSourceGPIOC
+#endif
+#ifndef PAJ_INT_PIN_SOURCE
+#define PAJ_INT_PIN_SOURCE     GPIO_PinSource3
+#endif
+/*
+ * Владелец общего вектора EXTI0..7.
+ *
+ * 1 (по умолчанию): библиотека определяет strong EXTI7_0_IRQHandler.
+ * Это обязательно для NoneOS-SDK: его weak fallback-handler зациклен, и
+ * weak обработчик библиотеки не гарантированно вытесняет этот fallback.
+ *
+ * 0: приложение само определяет EXTI7_0_IRQHandler и вызывает
+ * paj_handle_exti() / paj_clear_exti() для линии PAJ7620U2.
+ */
+#ifndef PAJ_PROVIDE_EXTI_ISR
+#define PAJ_PROVIDE_EXTI_ISR   1
+#endif
+
+/* ============================================================================
+ * ФЛАГ ПРЕРЫВАНИЯ (доступен из ISR и main loop)
+ * ============================================================================ */
+
+/* Флаг устанавливается ISR при falling edge (распознан жест).
+ * Main loop сбрасывает после обработки. */
+extern volatile uint8_t g_paj_int_flag;
+
+/* ============================================================================
+ * API
+ * ============================================================================ */
+
+/* Инициализация EXTI3 + NVIC.
+ * PC3: Input Pull-Up (INT open-drain active-low).
+ * Falling-edge trigger (жест распознан → INT low). */
+void paj_exti_init(void);
+
+/* Включение прерывания в NVIC */
+void paj_exti_enable(void);
+
+/* Отключение прерывания в NVIC */
+void paj_exti_disable(void);
+
+/* ============================================================================
+ * Обработка прерывания PAJ7620U2 — проверяет EXTI_Line3, ставит флаг.
+ * НЕ сбрасывает pending bit — вызывайте paj_clear_exti() после.
+ * ============================================================================ */
+void paj_handle_exti(void);
+
+/* ============================================================================
+ * Сброс pending bit EXTI_Line3
+ * ============================================================================ */
+void paj_clear_exti(void);
+
+/* ============================================================================
+ * USER CALLBACK — вызывается из EXTI7_0_IRQHandler библиотеки
+ *
+ * Переопределите эту функцию в своём коде, чтобы обработать другие EXTI
+ * линии (0-7 делят один вектор на CH32V003). Для полной замены обработчика
+ * установите PAJ_PROVIDE_EXTI_ISR=0 для всей сборки.
+ * ============================================================================ */
+void paj_exti_callback(void);
+
+#endif /* PAJ_INT_CONFIG_H */
