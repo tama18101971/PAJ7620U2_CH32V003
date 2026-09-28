@@ -1,0 +1,27 @@
+# Настройки clangd для этого проекта (используются Serena, PIO VS Code, VS Code
+# cpptools и любыми другими C/C++-инструментами).
+#
+# Зачем: compile_commands.json от PlatformIO содержит флаги RISC-V-компилятора
+# (`-march=rv32ecxw -mabi=ilp32e -msmall-data-limit=0 -msave-restore -flto`).
+# Нативный clang (clangd) не знает этих имён CPU и архитектуры, падает с
+# "unknown target CPU 'rv32ecxw'" и не отдаёт ни одного символа. Флаги реальной
+# сборки при этом не меняются — файл читают только языковые серверы.
+#
+# Код проекта — переносимый C99 без ассемблерных вставок, поэтому для анализа
+# достаточно стандартного x86-фронтенда clang: удаляем только целевые флаги.
+
+CompileFlags:
+  Remove:
+    - -march=rv32ecxw
+    - -mabi=ilp32e
+    - -msmall-data-limit=0
+    - -msave-restore
+    - -flto
+
+Diagnostics:
+  # Целевые регистры RISC-V и WCH-специфичные атрибуты в SDK-заголовках не имеют
+  # смысла для нативного clang — не засоряют вывод.
+  Suppress:
+    - target-specific-option
+    - unknown-warning-option
+    - -Wunknown-attributes

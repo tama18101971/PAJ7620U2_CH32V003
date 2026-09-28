@@ -56,7 +56,36 @@ No test framework configured. Manual testing via UART output (PD5, 115200 baud).
 | `library.json` | PlatformIO library manifest (v1.0.0, excludes `examples/`) |
 | `INTEGRATION_RU.md` | APDS-9960 → PAJ7620U2 migration, incl. DriverMD6 |
 | `LICENSE` | MIT license |
+| `.clangd` | Removes the RISC-V target flags from the compile DB for native clang/clangd |
+| `compile_commands.json` | Generated (`pio run -t compiledb`), git-ignored — feeds clangd/cpptools |
 | **Library:** `I2C-CH32V003` | I2C driver (via `lib_deps`, pinned `#v7.1.0`) |
+
+## Tooling: language server (clangd) and symbol tools
+
+C projects need an LSP backend; without one the symbol tools
+(`serena_find_symbol`, `serena_get_symbols_overview`, diagnostics) fail with
+"Active language servers: []" and only `search_for_pattern`/Grep work.
+
+- `.serena/project.yml` sets `language_servers: [cpp]` (Serena ships its own
+  pinned clangd in `~/.serena/language_servers/static/…`, nothing to install).
+  `.serena/memories/` holds the project knowledge graph — root is `core`.
+- `compile_commands.json` at the project root is required: refresh it with
+  `pio run -t compiledb` after changing `platformio.ini` (it is git-ignored,
+  as are `.cache/clangd/` and `.serena/{cache,project.local.yml}`).
+- `.clangd` is **mandatory**: the compile DB contains `-march=rv32ecxw
+  -mabi=ilp32e -msmall-data-limit=0 -msave-restore -flto`, which native clang
+  rejects with "unknown target CPU 'rv32ecxw'" and then returns an invalid AST
+  for every file. The `CompileFlags.Remove` list there fixes it; the real build
+  is unaffected.
+- A change to `language_servers` (or a fresh `.serena` config) only takes effect
+  after the Serena agent is re-created: switch to another project and back, or
+  reload the IDE window / start a new session.
+- Quick self-check: `serena project health-check` (run it with
+  `PYTHONIOENCODING=utf-8`, otherwise the final "✅" line raises a cp1251
+  `UnicodeEncodeError` on a Russian console — the check itself already passed).
+- VS Code: PlatformIO IDE does not create `.vscode/` until the folder is opened
+  as a project; `.vscode/tasks.json` provides `PIO: Build/Upload/Monitor` that
+  work without the extension.
 
 ## Architecture Notes
 
