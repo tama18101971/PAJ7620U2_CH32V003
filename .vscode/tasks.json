@@ -1,0 +1,68 @@
+// Задачи сборки и прошивки, работающие БЕЗ расширения PlatformIO IDE:
+// вызывают PlatformIO Core напрямую (полный путь к pio.exe, PATH не нужен).
+// Расширение PlatformIO добавляет одноимённые задачи "PlatformIO: ..." —
+// они не конфликтуют с этими.
+//
+// Ctrl+Shift+B          — PIO: Build (сборка)
+// Ctrl+Shift+P > Tasks  — PIO: Upload / PIO: Monitor / PIO: Clean
+// Команда F5 в файле main.c — "PIO: Build", Shift+F5 — "PIO: Upload"
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "PIO: Build",
+            "type": "process",
+            "command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\pio.exe",
+            "args": ["run"],
+            "problemMatcher": ["$gcc"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "detail": "Сборка примера examples/basic (окружение ch32v003f4p6_evt_r0)"
+        },
+        {
+            "label": "PIO: Upload",
+            "type": "process",
+            "command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\pio.exe",
+            "args": ["run", "-t", "upload"],
+            "problemMatcher": [],
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "detail": "Сборка и прошивка через WCH-Link"
+        },
+        {
+            "label": "PIO: Monitor",
+            "type": "process",
+            "command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\pio.exe",
+            "args": ["device", "monitor"],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "detail": "Монитор последовательного порта, 115200 бод"
+        },
+        {
+            "label": "PIO: Clean",
+            "type": "process",
+            "command": "${env:USERPROFILE}\\.platformio\\penv\\Scripts\\pio.exe",
+            "args": ["run", "-t", "clean"],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "detail": "Удаление артефактов сборки в .pio/build"
+        }
+    ]
+}
