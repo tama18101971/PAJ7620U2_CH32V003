@@ -52,9 +52,34 @@
  * выполняет переназначение программно, чтобы приложение всегда получало
  * физическое направление жеста. Влияет также на переназначение CW/CCW:
  * при повороте на 90/270 градусов они меняются местами.
- * 0 (по умолчанию) — модуль установлен без наклона, код не компилируется. */
+ * 0 (по умолчанию) — модуль установлен без наклона, код не компилируется.
+ *
+ * Как выбрать значение: датчик называет жесты относительно СЕБЯ, поэтому
+ * физическое направление жеста зависит от того, как модуль повёрнут на
+ * плате. Определите пару «физическое движение -> жест» (например, движение
+ * рукой в сторону, где у модуля верх по datasheet Figure 4) и подберите
+ * значение: направление датчика, физически совпадающее с эталонным,
+ * соответствует 0; поворот модуля на 90° по часовой стрелке — 1, на 180° —
+ * 2, на 270° — 3. */
 #ifndef PAJ_GESTURE_ROTATE
 #define PAJ_GESTURE_ROTATE              0
+#endif
+
+/* Политика для неуверенно распознанного жеста (0 или 1, по умолчанию 1).
+ *
+ * Датчик устанавливает биты флагов независимо, поэтому при слабом сигнале
+ * один физический жест может дать несколько битов сразу. Наблюдалось
+ * 0x43 = 0x3F — одновременно up, down, left, right, forward и backward, то
+ * есть датчик не выбрал направление. Раньше decode_gesture() брал младший
+ * установленный бит, и такая неопределенность превращалась в уверенно
+ * неверный жест — то есть в ложное срабатывание приложения.
+ *
+ * 1 (по умолчанию): чтение с обеими частями хотя бы одной антагонистической
+ * пары отбрасывается, приложение получает GESTURE_NONE и может повторить
+ * жест. Считается в paj_getAmbiguousCount().
+ * 0: прежнее поведение — выбирается младший установленный бит. */
+#ifndef PAJ_REJECT_AMBIGUOUS
+#define PAJ_REJECT_AMBIGUOUS            1
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -71,6 +96,31 @@
 #endif
 
 /* ---------------------------------------------------------------------------
+ * Пороги распознавания по осям (банк 0)
+ *
+ * 0x93 R_XDirectionThd[4:0] — влево/вправо
+ * 0x94 R_YDirectionThd[4:0] — вверх/вниз
+ *
+ * В отличие от остальных порогов gesture engine (0x95..0x9A, 0x9C, 0xCF)
+ * эти два НЕ входят в официальную начальную последовательность datasheet
+ * ("i. Initial"), поэтому остаются на заводском значении и не поддаются
+ * настройке. Значения ниже — заводские для проверенного модуля, поэтому
+ * драйвер пишет их явно: конфигурация становится воспроизводимой и не
+ * зависит от значения после сброса конкретного экземпляра.
+ *
+ * Меньшее значение — жест распознается легче (больше срабатываний, больше
+ * ложных). Большее — увереннее отсеивает шум, но медленные жесты теряются.
+ * Направление CW/CCW, forward/backward и wave настраиваются отдельно
+ * (0x9A, 0x96/0x97, 0xCF) и входят в начальную последовательность.
+ * ------------------------------------------------------------------------- */
+#ifndef PAJ_XDIR_THRESHOLD
+#define PAJ_XDIR_THRESHOLD           0x0D
+#endif
+#ifndef PAJ_YDIR_THRESHOLD
+#define PAJ_YDIR_THRESHOLD           0x0A
+#endif
+
+/* ---------------------------------------------------------------------------
  * Калибровка порогов proximity
  *
  * Драйвер снимает PAJ_CAL_SAMPLES замеров REG_PS_DATA, сортирует их,
@@ -79,6 +129,20 @@
  * ------------------------------------------------------------------------- */
 #ifndef PAJ_ENABLE_CALIBRATION
 #define PAJ_ENABLE_CALIBRATION          1
+#endif
+/* 0 (по умолчанию): paj_init() пороги не калибрует.
+ *
+ * В режиме жестов датчик REG_PS_DATA не обновляет (datasheet: "Only
+ * functional at proximity detection mode") — регистр отдаёт значение,
+ * зависящее от внешней засветки, а не от сигнала proximity. Калибровка по
+ * нему недетерминирована: на проверенном модуре при одном включении
+ * получалось median=45, sigma=0 -> пороги 45/33, при следующем — все
+ * замеры отбраковывались и оставались заводские 200/64. Для калибровки
+ * используйте paj_setProximityMode() + paj_recalibrate().
+ *
+ * 1: прежнее поведение — калибровка внутри paj_init(). */
+#ifndef PAJ_CALIBRATE_ON_INIT
+#define PAJ_CALIBRATE_ON_INIT         0
 #endif
 #ifndef PAJ_CAL_SAMPLES
 #define PAJ_CAL_SAMPLES                 16
@@ -131,6 +195,19 @@
 #define PAJ_RETRY_LIMIT                 6
 #endif
 
+/* Число подряд неудачных чтений, после которого выполняется переинициализация
+ * датчика (1..255).
+ *
+ * Одиночный NACK не означает, что датчик вышел из строя: датчик занят
+ * автоэкспозицией, либо шина сбоит в момент транзакции. Полная
+ * переинициализация — это wake-up плюс 47 записей регистров, единицы
+ * миллисекунд, в течение которых датчик не отвечает и все жесты теряются.
+ * Поэтому одиночные сбои только фиксируются в paj_getLastI2CStatus(), а
+ * переинициализация запускается после PAJ_REINIT_THRESHOLD сбоев подряд. */
+#ifndef PAJ_REINIT_THRESHOLD
+#define PAJ_REINIT_THRESHOLD           3
+#endif
+
 /* ---------------------------------------------------------------------------
  * Режимы работы
  * ------------------------------------------------------------------------- */
@@ -173,14 +250,26 @@
 #if (PAJ_GESTURE_ROTATE < 0) || (PAJ_GESTURE_ROTATE > 3)
 #error "PAJ_GESTURE_ROTATE must be in range 0..3"
 #endif
+#if (PAJ_REJECT_AMBIGUOUS != 0) && (PAJ_REJECT_AMBIGUOUS != 1)
+#error "PAJ_REJECT_AMBIGUOUS must be 0 or 1"
+#endif
 #if (PAJ_PROX_THRESHOLD < 1) || (PAJ_PROX_THRESHOLD > 255)
 #error "PAJ_PROX_THRESHOLD must be in range 1..255"
 #endif
 #if (PAJ_PROX_EXIT_TH < 0) || (PAJ_PROX_EXIT_TH >= PAJ_PROX_THRESHOLD)
 #error "PAJ_PROX_EXIT_TH must be in range 0..PAJ_PROX_THRESHOLD-1"
 #endif
+#if (PAJ_XDIR_THRESHOLD < 0) || (PAJ_XDIR_THRESHOLD > 0x1F)
+#error "PAJ_XDIR_THRESHOLD must be in range 0..0x1F"
+#endif
+#if (PAJ_YDIR_THRESHOLD < 0) || (PAJ_YDIR_THRESHOLD > 0x1F)
+#error "PAJ_YDIR_THRESHOLD must be in range 0..0x1F"
+#endif
 #if (PAJ_ENABLE_CALIBRATION != 0) && (PAJ_ENABLE_CALIBRATION != 1)
 #error "PAJ_ENABLE_CALIBRATION must be 0 or 1"
+#endif
+#if (PAJ_CALIBRATE_ON_INIT != 0) && (PAJ_CALIBRATE_ON_INIT != 1)
+#error "PAJ_CALIBRATE_ON_INIT must be 0 or 1"
 #endif
 #if (PAJ_CAL_SAMPLES < 4) || (PAJ_CAL_SAMPLES > 32)
 #error "PAJ_CAL_SAMPLES must be in range 4..32"
@@ -208,6 +297,9 @@
 #endif
 #if (PAJ_RETRY_LIMIT < 1) || (PAJ_RETRY_LIMIT > 255)
 #error "PAJ_RETRY_LIMIT must be in range 1..255"
+#endif
+#if (PAJ_REINIT_THRESHOLD < 1) || (PAJ_REINIT_THRESHOLD > 255)
+#error "PAJ_REINIT_THRESHOLD must be in range 1..255"
 #endif
 #if (PAJ_INT_MODE != 0) && (PAJ_INT_MODE != 1)
 #error "PAJ_INT_MODE must be 0 or 1"

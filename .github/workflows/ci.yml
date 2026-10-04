@@ -28,10 +28,20 @@ jobs:
             flags: "-DPAJ_GESTURE_ROTATE=2"
           - name: proximity-demo
             flags: "-DPAJ_EXAMPLE_PS_MODE=1"
+          - name: gesture-trace
+            flags: "-DPAJ_EXAMPLE_TRACE=1"
           - name: no-ps-mode
             flags: "-DPAJ_ENABLE_PS_MODE=0"
           - name: no-own-systick
             flags: "-DPAJ_OWN_SYSTICK=0"
+          - name: reinit-threshold-1
+            flags: "-DPAJ_REINIT_THRESHOLD=1"
+          - name: calibrate-on-init
+            flags: "-DPAJ_CALIBRATE_ON_INIT=1"
+          - name: axis-thresholds-tuned
+            flags: "-DPAJ_XDIR_THRESHOLD=0x0A -DPAJ_YDIR_THRESHOLD=0x0D"
+          - name: accept-ambiguous
+            flags: "-DPAJ_REJECT_AMBIGUOUS=0"
     name: build (${{ matrix.name }})
     steps:
       - name: Checkout repository
@@ -117,7 +127,7 @@ jobs:
       # flash. Bump these deliberately when a change is expected to grow the
       # firmware, so unintended growth (e.g. accidental printf/float/64-bit
       # helper pull-in) fails the build instead of silently eating headroom.
-      # Reference build (examples/basic, LTO on): RAM 508 B, Flash 10804 B.
+      # Reference build (examples/basic, LTO on): RAM 508 B, Flash 10484 B.
       - name: Build and check size ceilings
         env:
           PLATFORMIO_BUILD_SRC_FLAGS: "-Wextra -Werror"

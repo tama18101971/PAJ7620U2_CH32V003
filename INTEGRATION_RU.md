@@ -60,7 +60,7 @@ gesture engine, пороги FIFO, фильтрация пакетов, чувс
 
 ```ini
 lib_deps =
-    https://github.com/tama18101971/PAJ7620U2_CH32V003.git#v1.0.0   ; было APDS-9960_CH32V003#v1.3.0
+    https://github.com/tama18101971/PAJ7620U2_CH32V003.git#v1.0.1   ; было APDS-9960_CH32V003#v1.3.0
     ...
 
 build_flags =
@@ -150,4 +150,4 @@ if (i2c_init(400000) == I2C_OK && CFG->on_gst) {
    распознаёт жесты (раздел 4).
 5. Сопоставить размер прошивки: при `-DPAJ_ENABLE_CALIBRATION=0` и без
    `printf` драйвер занимает ~1.5 КБ флэша и 15 байт RAM
-   (эталонная сборка `examples/basic` с LTO: RAM 508 Б, Flash 10804 Б).
+   (эталонная сборка `examples/basic` с LTO: RAM 508 Б, Flash 10484 Б).

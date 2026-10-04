@@ -49,6 +49,14 @@ static uint8_t g_last_error;
  * I2C. Сбрасывается после любого успешного чтения датчика. */
 static uint8_t g_reinit_count;
 
+/* g_fail_streak — число неудачных чтений подряд. Полная переинициализация
+ * запускается только когда счётчик достигает PAJ_REINIT_THRESHOLD: одиночный
+ * NACK (датчик занят автоэкспозицией или шина сбоит в момент транзакции) не
+ * должен приводить к перезаписи всей конфигурации датчика — на это время
+ * датчик не отвечает и жесты теряются. Обнуляется после успешного чтения и
+ * после срабатывания порога. */
+static uint8_t g_fail_streak;
+
 /* Текущий банк регистров. PAJ_BANK_UNKNOWN означает «состояние неизвестно»
  * (после I2C wake-up/пробуждения датчика) — банк будет выбран принудительно. */
 #define PAJ_BANK_UNKNOWN   0xFF
@@ -63,6 +71,11 @@ static uint8_t   g_has_gesture;
 static uint8_t  g_cal_hi;
 static uint8_t  g_cal_lo;
 static uint8_t  g_cal_valid;
+
+/* Число чтений флагов, в которых датчик не смог выбрать направление (одновременно
+ * установлены обе части антагонистической пары, например up и down). Диагностика
+ * качества распознавания: paj_getAmbiguousCount(). */
+static uint8_t g_ambiguous;
 
 /* ============================================================================
  * ОБЕРТКИ НАД I2C (адрес датчика 0x73, два банка регистров)
@@ -193,7 +206,7 @@ static void poll_delay(void) {
  * её использует также paj_wakeup() (восстановление из suspend).
  * ============================================================================ */
 
-/* Начальная конфигурация (datasheet "i. Initial") — 43 записи. */
+/* Начальная конфигурация (datasheet "i. Initial") — 47 записей. */
 static const uint8_t g_init_seq[][3] = {
     /* банк 0: параметры gesture engine, AE и светового окружения */
     { PAJ_B0, 0x37, 0x07 }, { PAJ_B0, 0x38, 0x17 }, { PAJ_B0, 0x39, 0x06 },
@@ -216,7 +229,7 @@ static const uint8_t g_init_seq[][3] = {
 };
 
 #if PAJ_ENABLE_PS_MODE
-/* Режим proximity (datasheet "iii. Change to PS mode") — 25 записей. */
+/* Режим proximity (datasheet "iii. Change to PS mode") — 26 записей. */
 static const uint8_t g_ps_seq[][3] = {
     { PAJ_B0, 0x41, 0x00 }, { PAJ_B0, 0x42, 0x02 }, { PAJ_B0, 0x48, 0x20 },
     { PAJ_B0, 0x49, 0x00 }, { PAJ_B0, 0x51, 0x13 }, { PAJ_B0, 0x83, 0x00 },
@@ -320,6 +333,17 @@ static bool apply_thresholds(void) {
     return wr(PAJ_B0, REG_PS_TH_HIGH, hi) && wr(PAJ_B0, REG_PS_TH_LOW, lo);
 }
 
+/* Запись порогов gesture engine по осям (REG_GEST_TH_X/Y, банк 0).
+ * Вынесено из таблицы инициализации, потому что в официальной
+ * последовательности datasheet этих регистров нет: там остаются заводские
+ * значения, и в PAJ7620U2 (как и в любом другом экземпляре) они могут
+ * отличаться. Явная запись делает чувствительность к LEFT/RIGHT и UP/DOWN
+ * настраиваемой (PAJ_XDIR_THRESHOLD / PAJ_YDIR_THRESHOLD). */
+static bool apply_axis_thresholds(void) {
+    return wr(PAJ_B0, REG_GEST_TH_X, (uint8_t)PAJ_XDIR_THRESHOLD) &&
+           wr(PAJ_B0, REG_GEST_TH_Y, (uint8_t)PAJ_YDIR_THRESHOLD);
+}
+
 /* Запись масок прерываний (REG_INT1_EN / REG_INT2_EN, банк 0). */
 static bool write_int_masks(uint8_t m1, uint8_t m2) {
     return wr(PAJ_B0, REG_INT1_EN, m1) && wr(PAJ_B0, REG_INT2_EN, m2);
@@ -350,11 +374,14 @@ static bool enable_sensor(void) {
 }
 
 /* Полная конфигурация датчика: официальная начальная последовательность,
- * пороги proximity, включение и маски прерываний.
+ * пороги gesture engine и proximity, включение и маски прерываний.
  * Порядок соответствует datasheet: конфигурация пишется при выключенном
  * датчике, Enable — последней записью. */
 static bool configure_sensor(void) {
     if (!write_seq(g_init_seq, ARRAY_LEN(g_init_seq))) {
+        return false;
+    }
+    if (!apply_axis_thresholds()) {
         return false;
     }
     if (!apply_thresholds()) {
@@ -366,8 +393,8 @@ static bool configure_sensor(void) {
     return apply_int_masks();
 }
 
-/* Переинициализация датчика после сбоя I2C: полный цикл wake-up и
- * конфигурации, включая восстановление откалиброванных порогов. */
+/* Переинициализация датчика после серии сбоев I2C: полный цикл wake-up и
+ * конфигурации, включая восстановление порогов. */
 static bool sensor_reinit(void) {
     Delay_Ms(1);                 /* T1 > 700 мкс */
     wakeup_cmd();
@@ -377,12 +404,25 @@ static bool sensor_reinit(void) {
     return configure_sensor();
 }
 
-/* Восстановление после сбоя I2C. Счётчик сохраняется между сбоями и
- * сбрасывается после любого успешного чтения датчика. Провал
- * sensor_reinit() немедленно отражается как PAJ_ERR_SENSOR_HANG и не
- * маскируется под PAJ_ERR_I2C: иначе по публичному API невозможно отличить
- * «сбой чтения» от «сбоя чтения + неудачное восстановление». */
+/* Восстановление после сбоя I2C.
+ *
+ * Одиночный сбой не переинициализирует датчик: PAJ_REINIT_THRESHOLD сбоев подряд
+ * отделяют «шина качнулась» от «датчик действительно завис». Это важно для
+ * устойчивости жестов — перезапись всей конфигурации занимает единицы
+ * миллисекунд, в течение которых датчик не отвечает и результаты теряются.
+ *
+ * Счётчик переинициализаций сохраняется между сбоями и сбрасывается после
+ * любого успешного чтения датчика. Провал sensor_reinit() немедленно
+ * отражается как PAJ_ERR_SENSOR_HANG и не маскируется под PAJ_ERR_I2C: иначе
+ * по публичному API невозможно отличить «сбой чтения» от «сбоя чтения +
+ * неудачное восстановление». */
 static void recover_sensor(void) {
+    g_fail_streak++;
+    if (g_fail_streak < PAJ_REINIT_THRESHOLD) {
+        return;
+    }
+    g_fail_streak = 0;
+
     gesture_reset();
 
     if (g_reinit_count < PAJ_RETRY_LIMIT) {
@@ -459,27 +499,78 @@ static gesture_t decode_gesture(uint8_t flag1, uint8_t flag2) {
     return g;
 }
 
+/* true, если флаги содержат обе части хотя бы одной антагонистической пары.
+ * Одно физическое движение не может быть одновременно вверх и вниз, поэтому
+ * такой набор битов означает неуверенную классификацию датчика, а не жест.
+ * Считается всегда, влияние на результат задаёт PAJ_REJECT_AMBIGUOUS. */
+static bool flags_contradictory(uint8_t f1) {
+    return ((f1 & GES_PAIR_UP_DOWN)    == GES_PAIR_UP_DOWN)    ||
+           ((f1 & GES_PAIR_LEFT_RIGHT) == GES_PAIR_LEFT_RIGHT) ||
+           ((f1 & GES_PAIR_FWD_BACK)   == GES_PAIR_FWD_BACK)   ||
+           ((f1 & GES_PAIR_ROTATE)     == GES_PAIR_ROTATE);
+}
+
+/* Сохранить декодированный жест в кэш: датчик сбрасывает флаги при чтении,
+ * поэтому пережить чтение может только кэш. */
+static void cache_gesture(gesture_t g) {
+    if (g == GESTURE_NONE) {
+        return;
+    }
+    g_gesture     = g;
+    g_has_gesture = 1;
+}
+
 /* Чтение флагов жеста (REG_INT_FLAG1 + REG_INT_FLAG2) с декодированием.
  * ВНИМАНИЕ: чтение этих регистров сбрасывает флаги в датчике, поэтому
  * найденный жест кладётся в кэш — читатель заберёт его paj_readGesture().
- * Возвращает: true если I2C успешен (независимо от наличия жеста). */
+ *
+ * REG_INT_FLAG1 читается и декодируется ПЕРВЫМ и отдельно от 0x44: если
+ * после этого чтение 0x44 сорвётся, жест из 0x43 уже нельзя ни перечитать,
+ * ни восстановить, и он был бы молча потерян вместе с кэшем. Такой сбой
+ * стоит только флага wave (он лежит в 0x44), а не всего результата.
+ *
+ * Возвращает: true если оба регистра прочитаны. */
 static bool poll_gesture(void) {
-    uint8_t f1, f2;
-    if (!rd(PAJ_B0, REG_INT_FLAG1, &f1)) {
-        return false;
+    uint8_t   f1  = 0;
+    uint8_t   f2  = 0;
+    gesture_t g   = GESTURE_NONE;
+    bool      bad = false;
+    bool      f1_ok;
+
+    f1_ok = rd(PAJ_B0, REG_INT_FLAG1, &f1);
+    if (f1_ok) {
+        bad = flags_contradictory(f1);
+        if (bad) {
+            g_ambiguous++;
+        }
+        if (!bad || !PAJ_REJECT_AMBIGUOUS) {
+            /* Флаг wave живёт в 0x44, поэтому здесь он не учитывается:
+             * приоритет «направление важнее wave» держится за счёт порядка. */
+            g = decode_gesture(f1, 0x00);
+            cache_gesture(g);
+        }
     }
+
     if (!rd(PAJ_B0, REG_INT_FLAG2, &f2)) {
         return false;
     }
-
-    gesture_t g = decode_gesture(f1, f2);
-    if (g != GESTURE_NONE) {
-        g_gesture     = g;
-        g_has_gesture = 1;
-#ifdef PAJ7620U2_DEBUG
-        printf("GES: raw=%02X/%02X -> %d\r\n", f1, f2, (int)g);
-#endif
+    if (!f1_ok) {
+        return false;
     }
+    if (f1 == 0x00) {
+        /* Направлений нет — единственный источник жеста здесь wave. */
+        g = decode_gesture(0x00, f2);
+        cache_gesture(g);
+    }
+
+    /* Оба регистра прочитаны — шина жива, цепочка сбоев прерывается. */
+    g_fail_streak = 0;
+
+#ifdef PAJ7620U2_DEBUG
+    if (g != GESTURE_NONE || bad) {
+        printf("GES: %02X/%02X%s -> %d\r\n", f1, f2, bad ? " AMB" : "", (int)g);
+    }
+#endif
     return true;
 }
 
@@ -631,12 +722,20 @@ bool paj_init(void) {
         if (configure_sensor()) {
             gesture_reset();
             g_reinit_count = 0;
+            g_fail_streak  = 0;
+            g_ambiguous    = 0;
 
-#if PAJ_ENABLE_CALIBRATION
+#if PAJ_ENABLE_CALIBRATION && PAJ_CALIBRATE_ON_INIT
             if (!calibrate_proximity()) {
                 g_last_error = PAJ_ERR_I2C;
                 return false;
             }
+#elif PAJ_ENABLE_CALIBRATION
+            /* Датчик сейчас в режиме жестов, где REG_PS_DATA не отражает
+             * сигнал proximity, поэтому пороги остаются заданными в
+             * конфигурации. Калибровка выполняется явно через
+             * paj_setProximityMode() + paj_recalibrate(). */
+            g_cal_valid = 0;
 #endif
             g_last_error = PAJ_ERR_NONE;
             return true;
@@ -685,6 +784,8 @@ bool paj_wakeup(void) {
      * чтение после пробуждения. */
     gesture_reset();
     g_reinit_count = 0;
+    g_fail_streak  = 0;
+    g_ambiguous    = 0;
 
     g_last_error = PAJ_ERR_NONE;
     return true;
@@ -710,7 +811,10 @@ bool paj_available(void) {
     if (!poll_gesture()) {
         g_last_error = PAJ_ERR_I2C;
         recover_sensor();
-        return false;
+        /* Жест из успешно прочитанного REG_INT_FLAG1 не теряется из-за
+         * сбоя чтения REG_INT_FLAG2: он уже в кэше, а recover_sensor()
+         * сбрасывает кэш только при реальной переинициализации. */
+        return g_has_gesture != 0;
     }
 
     g_reinit_count = 0;
@@ -752,6 +856,13 @@ gesture_t paj_readGesture(void) {
         if (!poll_gesture()) {
             g_last_error = PAJ_ERR_I2C;
             recover_sensor();
+            /* Жест из успешно прочитанного REG_INT_FLAG1 достовернее ошибки
+             * чтения REG_INT_FLAG2: отдаём его, а ошибка остаётся видимой
+             * через paj_getLastError(). */
+            if (g_has_gesture) {
+                g_has_gesture = 0;
+                return g_gesture;
+            }
             return GESTURE_NONE;
         }
         if (g_has_gesture) {
@@ -793,6 +904,10 @@ uint8_t paj_getLastI2CStatus(void) {
 
 uint8_t paj_getReinitCount(void) {
     return g_reinit_count;
+}
+
+uint8_t paj_getAmbiguousCount(void) {
+    return g_ambiguous;
 }
 
 bool paj_recalibrate(void) {

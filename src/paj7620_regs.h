@@ -36,6 +36,14 @@
 #define REG_INT_FLAG1          0x43  /* флаги жестов, сбрасываются чтением */
 #define REG_INT_FLAG2          0x44  /* бит1 = флаг PS, бит0 = флаг wave */
 #define REG_STATE              0x45  /* биты[1:0] — состояние автомата датчика */
+
+/* Пороги gesture engine по осям (datasheet V0.8, "Register Map").
+ * В официальную начальную последовательность ("i. Initial") эти регистры НЕ
+ * входят, поэтому в датчике остаются заводскими и настройке через таблицу
+ * инициализации не поддаются; драйвер записывает их отдельным шагом
+ * (apply_axis_thresholds() в paj7620.c). */
+#define REG_GEST_TH_X          0x93  /* биты[4:0] — порог влево/вправо */
+#define REG_GEST_TH_Y          0x94  /* биты[4:0] — порог вверх/вниз */
 #define REG_PS_TH_HIGH         0x69  /* верхний порог гистерезиса PS */
 #define REG_PS_TH_LOW          0x6A  /* нижний порог гистерезиса PS */
 #define REG_PS_APPROACH        0x6B  /* бит0 = объект в зоне срабатывания */
@@ -75,6 +83,14 @@
 #define GES_BACKWARD           0x20  /* [5] отведение (pull) */
 #define GES_CW                 0x40  /* [6] круг по часовой стрелке */
 #define GES_CCW                0x80  /* [7] круг против часовой стрелки */
+
+/* Антагонистические пары жестов: обе части одной пары означают, что датчик
+ * не смог определить направление (например UP и DOWN одновременно). Такой
+ * набор битов — признак неуверенной классификации, а не жеста. */
+#define GES_PAIR_UP_DOWN       0x03  /* GES_UP | GES_DOWN */
+#define GES_PAIR_LEFT_RIGHT    0x0C  /* GES_LEFT | GES_RIGHT */
+#define GES_PAIR_FWD_BACK      0x30  /* GES_FORWARD | GES_BACKWARD */
+#define GES_PAIR_ROTATE        0xC0  /* GES_CW | GES_CCW */
 
 /* REG_INT2_EN (0x42) — маски: [1] = PS, [0] = wave */
 #define INT2_WAVE_MASK         0x01

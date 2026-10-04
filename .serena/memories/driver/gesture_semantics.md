@@ -5,12 +5,18 @@
 - Datasheet: "The gesture detection interrupt flag will be cleared by reading
   Register Bank 0, Addr 0x43 and 0x44." A read is destructive.
 - Therefore the driver separates *acquire* from *consume*:
-  - `poll_gesture()` reads 0x43 and 0x44, decodes, and stores the result in
-    `g_gesture`/`g_has_gesture`;
+  - `poll_gesture()` reads 0x43, decodes and caches into
+    `g_gesture`/`g_has_gesture`, then reads 0x44 and adds wave only if 0x43
+    yielded nothing;
   - `paj_available()` = `poll_gesture()` + "is something pending";
   - `paj_readGesture()` = take the cache, or block-wait for a new one;
   - `paj_clearInterrupt()` calls `poll_gesture()` too, so an INT clear never
     destroys a gesture that is already in hand.
+- The two registers are read in that order and decoded separately on purpose:
+  a failing 0x44 read costs only the wave flag. `paj_available()` /
+  `paj_readGesture()` still hand the cached 0x43 gesture to the caller and
+  report `PAJ_ERR_I2C` — the flags cannot be re-read, so dropping the gesture
+  would lose it for good.
 - Adding any other 0x43/0x44 read is a bug: it eats the gesture the caller
   was about to receive.
 - Flags are read as two single-register transactions, not one 2-byte block:
@@ -19,8 +25,18 @@
 ## Decode order
 
 `Up, Down, Left, Right, Forward, Backward, CW, CCW`, then wave (`0x44 bit0`) as
-the fallback. First match wins, so multi-bit results are deterministic.
-`forward`/`backward`/`wave` are rotation-independent.
+the fallback. `forward`/`backward`/`wave` are rotation-independent.
+
+Before decoding, `flags_contradictory()` rejects a read holding both halves of
+an antipodal pair (`GES_PAIR_*`): one physical gesture cannot be up *and*
+down. Measured ambiguity on the bench was `0x43 = 0x3F`. With
+`PAJ_REJECT_AMBIGUOUS=1` (default) such a read yields `GESTURE_NONE` and
+increments `g_ambiguous` (`paj_getAmbiguousCount()`), because emitting the
+lowest set bit turned indecision into a confidently wrong gesture — the exact
+failure mode users report as unstable recognition. A high counter means weak
+signal (IR LED rail, hand distance, gesture speed) or a bad
+`PAJ_XDIR_THRESHOLD`/`PAJ_YDIR_THRESHOLD`, not a driver bug.
+`PAJ_REJECT_AMBIGUOUS=0` restores the lowest-set-bit behaviour.
 
 ## Rotation
 

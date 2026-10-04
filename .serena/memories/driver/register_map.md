@@ -28,14 +28,37 @@ Bank 1: `0x72` Enable (bit0), `0x44` PS gain, `0x67..0x6E` state-machine steps.
 ## Gesture flags (0x43) bit order
 
 `bit0 Up, bit1 Down, bit2 Left, bit3 Right, bit4 Forward, bit5 Backward,
-bit6 CW, bit7 CCW`; wave is `0x44 bit0`. Decode picks the **lowest** set bit
-for determinism.
+bit6 CW, bit7 CCW`; wave is `0x44 bit0`.
+
+Decode is not simply "lowest set bit". The sensor sets bits independently, so
+a weak signal yields several at once — `0x43 = 0x3F` (up+down+left+right+
+forward+backward) was measured on the bench. `flags_contradictory()` rejects
+any read containing both halves of an antipodal pair (`GES_PAIR_*` in
+`paj7620_regs.h`) while `PAJ_REJECT_AMBIGUOUS=1` (default); events are counted
+in `g_ambiguous` / `paj_getAmbiguousCount()`. `PAJ_REJECT_AMBIGUOUS=0`
+restores the lowest-set-bit behaviour. Wave loses to any directional flag.
+
+## Gesture thresholds
+
+Bank 0 `0x93 R_XDirectionThd[4:0]` (left/right) and `0x94 R_YDirectionThd[4:0]`
+(up/down) are in the datasheet "Register Map" but **absent from the "i. Initial"
+array**, so they stay at the power-on value and cannot be tuned through the
+table. Measured power-on: `0x93=0x0D`, `0x94=0x0A`. They are now
+`PAJ_XDIR_THRESHOLD` / `PAJ_YDIR_THRESHOLD` (range 0..0x1F) written by
+`apply_axis_thresholds()`, so the left/right and up/down sensitivity is the
+one lever over these four gestures.
+
+Every other gesture-engine register *is* in the init array: `0x90`
+no-motion count, `0x95` Z threshold, `0x96`/`0x97` forward/backward, `0x9A`
+rotate, `0x9C` IIR filter weight + distance, `0x9F` bit4..7 = rotate / Z / Y /
+X detection enables (init writes `0xF9`, i.e. all four groups on), `0xCF`
+wave count + angle, `0xD0` abort count + XY ratio.
 
 ## Tables
 
-`g_init_seq` (43 entries) = datasheet "i. Initial" minus the 0xEF writes and
+`g_init_seq` (47 entries) = datasheet "i. Initial" minus the 0xEF writes and
 minus `{bank1, 0x72, 0x01}` (Enable is written by `enable_sensor()` so
-`paj_wakeup()` can reuse it). `g_ps_seq` (25) = "iii. Change to PS mode",
+`paj_wakeup()` can reuse it). `g_ps_seq` (26) = "iii. Change to PS mode",
 `g_gesture_seq` (24) = "v. Change to Gesture mode" (its trailing mask writes
 are replaced by config-driven masks). Order is datasheet order — do not
 "optimize" it.

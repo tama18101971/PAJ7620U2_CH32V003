@@ -9,7 +9,7 @@ No test framework, no linter, no formatter configured. "Done" means:
    `PAJ_ENABLE_PS_MODE=0`, `PAJ_OWN_SYSTICK=0`.
    A variant that stops compiling when its feature is switched off is a bug.
 2. **Size ceilings hold** (footprint guard, default config): RAM ≤ 600 B,
-   Flash ≤ 13000 B. Baseline 508 B / 10804 B. Raise a ceiling only deliberately,
+   Flash ≤ 13000 B. Baseline 508 B / 10484 B. Raise a ceiling only deliberately,
    in the same commit, with a reason.
 3. **No float / no malloc / no unbounded stack frame** introduced; peak frame
    stays `calibrate_proximity()`'s `PAJ_CAL_SAMPLES` buffer (16 B).

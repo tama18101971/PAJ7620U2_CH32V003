@@ -50,7 +50,7 @@ on the same pinout/API. Target of migration: `E:\GitProjects\DriverMD6`.
 
 GitHub `tama18101971/PAJ7620U2_CH32V003` (public, `main`), v1.0.0, MIT.
 CI: 10 jobs green — 9 build variants with `-Wextra -Werror` + size guard.
-Measured footprint (`examples/basic`, LTO on): RAM 508 B, Flash 10804 B
+Measured footprint (`examples/basic`, LTO on): RAM 508 B, Flash 10484 B
 (driver alone: 1427 B of `paj_*`/table symbols + 15 B bss; small helpers are
 partly inlined into their callers by LTO, so treat ~1.4–1.5 KB as the honest
 range).
