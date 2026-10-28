@@ -117,7 +117,7 @@ jobs:
       # flash. Bump these deliberately when a change is expected to grow the
       # firmware, so unintended growth (e.g. accidental printf/float/64-bit
       # helper pull-in) fails the build instead of silently eating headroom.
-      # Reference build (examples/basic, LTO on): RAM 508 B, Flash 10804 B.
+      # Reference build (examples/basic, LTO on): RAM 524 B, Flash 11244 B.
       - name: Build and check size ceilings
         env:
           PLATFORMIO_BUILD_SRC_FLAGS: "-Wextra -Werror"

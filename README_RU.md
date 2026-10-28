@@ -13,7 +13,7 @@ API повторяет драйвер [APDS-9960_CH32V003](https://github.com/ta
 * Proximity с автоматической калибровкой порогов.
 * Прерывание INT → EXTI (PC3) либо polling.
 * Проверка готовности датчика и самовосстановление после сбоев I2C.
-* Флэш: ~1.5 КБ при LTO, RAM: 15 байт статики (+ буфер калибровки в стеке).
+* Флэш: ~1.5 КБ при LTO, RAM: ~32 байта статики (+ буфер калибровки в стеке).
 
 ## Подключение
 
@@ -64,8 +64,9 @@ if (!paj_init()) {
 }
 
 for (;;) {
-    if (paj_available()) {
-        gesture_t g = paj_readGesture();
+    /* now_ms — монотонные миллисекунды приложения (в примере их даёт TIM2). */
+    if (paj_poll(now_ms)) {
+        gesture_t g = paj_takeGesture();
         switch (g) {
             case GESTURE_UP:    /* ... */ break;
             case GESTURE_DOWN:  /* ... */ break;
@@ -89,14 +90,16 @@ paj_exti_init();          /* PC3 → EXTI3, falling-edge + NVIC */
 paj_enableInterrupt();    /* маски 0x41/0x42: INT активен на разрешённые жесты */
 
 for (;;) {
-    __WFI();              /* просыпаемся по g_paj_int_flag */
-    if (paj_available()) {
-        gesture_t g = paj_readGesture();
+    __WFI();              /* TIM2 (1 мс) и/или INT пробуждают МК */
+    if (paj_poll(now_ms)) {
+        gesture_t g = paj_takeGesture();
         /* ... */
     }
 }
 ```
 
+`paj_poll()` нужно вызывать регулярно и в режиме EXTI: без нового фронта INT
+именно следующие вызовы завершают временное подтверждение бокового жеста.
 Все EXTI 0…7 на CH32V003 делят один вектор. Если обработчик уже определён
 приложением (как в DriverMD6), соберите библиотеку с
 `-DPAJ_PROVIDE_EXTI_ISR=0` и вызывайте `paj_handle_exti()` /
@@ -110,8 +113,10 @@ for (;;) {
 | `bool paj_sleep(void)` | Пассивный режим: снятие Enable, конфигурация сохраняется |
 | `bool paj_wakeup(void)` | I2C wake-up + Enable, сброс состояния жеста |
 | `bool paj_shutdown(void)` | Enable = 0 + suspend (IDD_SUS ~15 мкА) |
-| `bool paj_available(void)` | Есть ли жест (неблокирующе); жест кэшируется |
-| `gesture_t paj_readGesture(void)` | Забрать жест; без кэша — ждёт до `PAJ_GESTURE_TIMEOUT_MS` |
+| `bool paj_poll(uint32_t now_ms)` | Рекомендуемый неблокирующий сервис: расписание, entry-фильтр и cooldown |
+| `gesture_t paj_takeGesture(void)` | Забрать готовый жест без ожидания |
+| `bool paj_available(void)` | Legacy-опрос без временной фильтрации; жест кэшируется |
+| `gesture_t paj_readGesture(void)` | Legacy: забрать жест; без кэша — ждёт до `PAJ_GESTURE_TIMEOUT_MS` |
 | `bool paj_readProximity(uint8_t *v)` | PS-данные 0…255 (нужен режим proximity) |
 | `bool paj_readStatus(uint8_t *v)` | Состояние автомата датчика: 0 = OP, 1 = S1, 2 = S2 |
 | `uint8_t paj_getLastError(void)` | `PAJ_ERR_NONE` / `I2C` / `SENSOR_HANG` / `INVALID_ID` / `UNSUPPORTED` |
@@ -145,6 +150,9 @@ for (;;) {
 | `PAJ_CAL_SAMPLES` | `16` | Число замеров при калибровке |
 | `PAJ_CAL_SIGMA_COEFF` | `3` | Порог = медиана + N·σ |
 | `PAJ_CAL_INTERVAL_MS` | `2` | Пауза между замерами |
+| `PAJ_POLL_INTERVAL_MS` | `5` | Период чтения флагов в `paj_poll()` |
+| `PAJ_GESTURE_CONFIRM_MS` | `40` | Подтверждение бокового жеста; `0` — без задержки |
+| `PAJ_GESTURE_COOLDOWN_MS` | `150` | Подавление событий после выдачи; `0` — выключено |
 | `PAJ_GESTURE_TIMEOUT_MS` | `300` | Таймаут блокирующего `paj_readGesture()` |
 | `PAJ_WAKEUP_TIMEOUT_MS` | `20` | Ожидание готовности датчика (T1 > 700 мкс) |
 | `PAJ_OWN_SYSTICK` | `1` | `0` — не трогать SysTick (свой таймер в приложении) |
@@ -166,7 +174,7 @@ for (;;) {
   STOP) и T1 > 700 мкс, T2 > 400 мкс. До окончания пробуждения датчик не
   отвечает ACK — драйвер это учитывает и не считает ошибкой.
 * **Инициализация** — официальная последовательность из datasheet
-  («i. Initial», 43 записи), затем пороги proximity, затем `Enable`, затем
+  («i. Initial», 47 рабочих записей), затем пороги proximity, затем `Enable`, затем
   маски прерываний. Включение подтверждается чтением `bank1 0x72`.
 * **Отказоустойчивость.** Сбой I2C в `paj_available()`/внутри
   `paj_readGesture()` приводит к полной переинициализации датчика
@@ -185,7 +193,8 @@ for (;;) {
 * **Адресное пространство.** Только 7-битный адрес `0x73`; датчик не
   поддерживает clock stretching и работает на частоте до 400 кГц.
 * **Только один жест в датчике.** При медленном опросе часть жестов
-  теряется — для потоков «INT → чтение» потерь нет.
+  теряется. EXTI снижает задержку, но не гарантирует доставку: готовый результат
+   нужно своевременно забирать через `paj_takeGesture()`.
 * **Proximity не обновляется в режиме жестов** — `paj_readProximity()`
   вернёт 0, пока не вызван `paj_setProximityMode()`.
 * **`SysTick->CNT` не является временной базой**, пока используются
@@ -206,7 +215,7 @@ pio run -t upload       # прошивка через WCH-Link
 pio run -t size         # размер прошивки
 ```
 
-Эталонная сборка `examples/basic` (LTO включён): **RAM 508 Б, Flash 10804 Б**
+Эталонная сборка `examples/basic` (LTO включён): **RAM 524 Б, Flash 11244 Б**
 при 2048 Б RAM / 16384 Б флэша. CI (`.github/workflows/ci.yml`) собирает
 девять конфигураций с `-Wextra -Werror` и проверяет потолки размера.
 

@@ -14,7 +14,7 @@ pinout), so moving a project from the APDS-9960 is a rename — see
 * Proximity readout with automatic threshold calibration.
 * INT → EXTI (PC3) interrupts or polling.
 * Sensor readiness check and automatic re-initialisation after I2C faults.
-* Footprint: ~1.5 KB of flash with LTO, 15 bytes of static RAM (plus the
+* Footprint: ~1.5 KB of flash with LTO, ~32 bytes of static RAM (plus the
   calibration buffer on the stack).
 
 ## Wiring
@@ -62,8 +62,9 @@ if (!paj_init()) {
 }
 
 for (;;) {
-    if (paj_available()) {
-        gesture_t g = paj_readGesture();
+    /* now_ms: the application's monotonic millisecond counter (TIM2 in the example). */
+    if (paj_poll(now_ms)) {
+        gesture_t g = paj_takeGesture();
         if (g == GESTURE_UP)    { /* ... */ }
     }
 }
@@ -81,8 +82,10 @@ modes and a proximity demo lives in [examples/basic/main.c](examples/basic/main.
 | `bool paj_sleep(void)` | Passive: clear Enable, configuration retained |
 | `bool paj_wakeup(void)` | I2C wake-up + Enable, gesture state reset |
 | `bool paj_shutdown(void)` | Enable = 0 + suspend (IDD_SUS ≈ 15 µA) |
-| `bool paj_available(void)` | Non-blocking check; the gesture is cached |
-| `gesture_t paj_readGesture(void)` | Consume the gesture, waiting up to `PAJ_GESTURE_TIMEOUT_MS` |
+| `bool paj_poll(uint32_t now_ms)` | Recommended non-blocking service: scheduling, entry filter and cooldown |
+| `gesture_t paj_takeGesture(void)` | Consume a ready gesture without waiting |
+| `bool paj_available(void)` | Legacy immediate poll without time filtering; the gesture is cached |
+| `gesture_t paj_readGesture(void)` | Legacy consume, waiting up to `PAJ_GESTURE_TIMEOUT_MS` |
 | `bool paj_readProximity(uint8_t *v)` | PS data 0…255 (proximity mode required) |
 | `bool paj_readStatus(uint8_t *v)` | Sensor state machine: 0 = OP, 1 = S1, 2 = S2 |
 | `uint8_t paj_getLastError(void)` | `PAJ_ERR_NONE` / `I2C` / `SENSOR_HANG` / `INVALID_ID` / `UNSUPPORTED` |
@@ -110,6 +113,9 @@ separately).
 | `PAJ_GESTURE_ROTATE` | `0` | Module rotation 0/90/180/270° (software remap) |
 | `PAJ_PROX_THRESHOLD` / `PAJ_PROX_EXIT_TH` | `200` / `64` | Proximity thresholds (datasheet defaults) |
 | `PAJ_ENABLE_CALIBRATION`, `PAJ_CAL_*` | `1`, `16`, `3`, `2` | Threshold calibration |
+| `PAJ_POLL_INTERVAL_MS` | `5` | Flag-read period in `paj_poll()` |
+| `PAJ_GESTURE_CONFIRM_MS` | `40` | Directional entry filter; `0` disables the delay |
+| `PAJ_GESTURE_COOLDOWN_MS` | `150` | Event suppression after publication; `0` disables it |
 | `PAJ_GESTURE_TIMEOUT_MS` | `300` | Blocking `paj_readGesture()` deadline |
 | `PAJ_WAKEUP_TIMEOUT_MS` | `20` | Sensor readiness timeout (T1 > 700 µs) |
 | `PAJ_OWN_SYSTICK` | `1` | `0` keeps the application SysTick untouched |
@@ -132,7 +138,7 @@ separately).
   ACK until wake-up completes — the driver expects that and does not treat it
   as an error.
 * **Initialisation** uses the official datasheet sequence ("i. Initial",
-  43 writes), then proximity thresholds, then `Enable`, then interrupt masks.
+  47 working writes), then proximity thresholds, then `Enable`, then interrupt masks.
   Enabling is confirmed by reading bank 1 `0x72`.
 * **Fault tolerance.** An I2C fault inside `paj_available()` or
   `paj_readGesture()` triggers a full re-initialisation (up to
@@ -148,7 +154,7 @@ separately).
   never call them from an ISR.
 * 7-bit address `0x73` only; no clock stretching; bus speed up to 400 kHz.
 * The sensor keeps only the **latest** gesture, so slow polling can drop
-  gestures (an INT-driven read does not lose them).
+  gestures. EXTI reduces latency but cannot replace timely `paj_takeGesture()` calls.
 * Proximity data is not updated in gesture mode: `paj_readProximity()` returns
   0 until `paj_setProximityMode()` is called.
 * `SysTick->CNT` is **not** a time base while `Delay_Ms()/Delay_Us()` are in
@@ -164,7 +170,7 @@ pio run -t upload       # flash via WCH-Link
 pio run -t size         # firmware size
 ```
 
-Reference build of `examples/basic` (LTO on): **RAM 508 B, Flash 10804 B** of
+Reference build of `examples/basic` (LTO on): **RAM 524 B, Flash 11244 B** of
 2048 B RAM / 16384 B flash. CI (`.github/workflows/ci.yml`) builds nine
 configurations with `-Wextra -Werror` and enforces size ceilings.
 

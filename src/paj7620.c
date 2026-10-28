@@ -12,7 +12,7 @@
  *   - режим жестов       — "v. Change to Gesture mode"
  *   - suspend / resume   — "vi. Enter Suspend mode" / "vii. Resume Gesture"
  *
- * Потребление RAM: ~20 байт статика (+ буфер калибровки в стеке).
+ * Потребление RAM: ~32 байта статики (+ буфер калибровки в стеке).
  */
 
 #include "paj7620.h"
@@ -58,6 +58,13 @@ static uint8_t g_bank = PAJ_BANK_UNKNOWN;
  * сбрасывает флаги при чтении, поэтому жест переживает чтение только здесь. */
 static gesture_t g_gesture;
 static uint8_t   g_has_gesture;
+
+/* Состояние неблокирующего фильтра paj_poll(). Метки uint32_t сравниваются
+ * знаковой разностью, поэтому переполнение счётчика миллисекунд безопасно. */
+static uint32_t g_next_poll_ms;
+static uint32_t g_pending_deadline_ms;
+static uint32_t g_cooldown_until_ms;
+static uint8_t  g_pending_gesture;
 
 /* Откалиброванные пороги proximity и признак их действительности. */
 static uint8_t  g_cal_hi;
@@ -133,6 +140,25 @@ static bool write_seq(const uint8_t (*seq)[3], uint8_t count) {
     return true;
 }
 
+/* Беззнаковое деление через сдвиги и вычитание. На RV32EC нет аппаратного
+ * деления; этот небольшой вариант не вызывает __udivsi3 из libgcc.
+ * Используется только в init/legacy timeout и калибровке, не в paj_poll().
+ * Делитель обязан быть ненулевым. */
+#if PAJ_OWN_SYSTICK || PAJ_ENABLE_CALIBRATION
+static uint32_t udiv32_u16(uint32_t numerator, uint16_t denominator) {
+    uint32_t quotient = 0;
+    uint32_t remainder = 0;
+    for (uint8_t bit = 32; bit-- > 0;) {
+        remainder = (remainder << 1) | ((numerator >> bit) & 1UL);
+        if (remainder >= denominator) {
+            remainder -= denominator;
+            quotient |= 1UL << bit;
+        }
+    }
+    return quotient;
+}
+#endif
+
 /* ============================================================================
  * ТАЙМБЕЙС ЦИКЛА paj_readGesture()
  *
@@ -159,7 +185,7 @@ static uint16_t g_ticks_per_ms;
 
 /* Запустить свободнобегущий SysTick от нуля. */
 static void timebase_start(void) {
-    g_ticks_per_ms = (uint16_t)(SystemCoreClock / 8UL / 1000UL); /* HCLK/8 */
+    g_ticks_per_ms = (uint16_t)udiv32_u16(SystemCoreClock >> 3, 1000); /* HCLK/8 */
     SysTick->SR   = 0;
     SysTick->CMP  = 0xFFFFFFFFu;
     SysTick->CNT  = 0;
@@ -193,7 +219,8 @@ static void poll_delay(void) {
  * её использует также paj_wakeup() (восстановление из suspend).
  * ============================================================================ */
 
-/* Начальная конфигурация (datasheet "i. Initial") — 43 записи. */
+/* Начальная конфигурация (datasheet "i. Initial") — 47 записей.
+ * static const uint8_t[][3]: только .rodata/.text во Flash, без RAM-копии. */
 static const uint8_t g_init_seq[][3] = {
     /* банк 0: параметры gesture engine, AE и светового окружения */
     { PAJ_B0, 0x37, 0x07 }, { PAJ_B0, 0x38, 0x17 }, { PAJ_B0, 0x39, 0x06 },
@@ -249,10 +276,20 @@ static const uint8_t g_gesture_seq[][3] = {
  * ПРОБУЖДЕНИЕ И ВКЛЮЧЕНИЕ
  * ============================================================================ */
 
-/* Сброс состояния жеста (кэш + счётчики). */
+/* Сброс только временного автомата: уже готовый жест при восстановлении I2C
+ * сохраняется, а неоднозначный кандидат отбрасывается. */
+static void filter_reset(void) {
+    g_next_poll_ms         = 0;
+    g_pending_deadline_ms  = 0;
+    g_cooldown_until_ms    = 0;
+    g_pending_gesture      = GESTURE_NONE;
+}
+
+/* Полный сброс при init/wakeup/смене режима. */
 static void gesture_reset(void) {
     g_gesture     = GESTURE_NONE;
     g_has_gesture = 0;
+    filter_reset();
 }
 
 /* I2C wake-up: START + slave ID + STOP.
@@ -383,7 +420,8 @@ static bool sensor_reinit(void) {
  * маскируется под PAJ_ERR_I2C: иначе по публичному API невозможно отличить
  * «сбой чтения» от «сбоя чтения + неудачное восстановление». */
 static void recover_sensor(void) {
-    gesture_reset();
+    /* Не теряем событие, которое приложение ещё не забрало из кэша. */
+    filter_reset();
 
     if (g_reinit_count < PAJ_RETRY_LIMIT) {
         g_reinit_count++;
@@ -438,49 +476,130 @@ static void recover_sensor(void) {
 #endif
 
 /* Декодирование флагов датчика в тип жеста.
- * Датчик выставляет битовые флаги (0x43/0x44), а не код; при нескольких
- * установленных битах выбирается младший — так поведение детерминировано
- * и не зависит от порядка регистровых чтений.
- * forward/backward/wave не зависят от ориентации модуля. */
+ * Если датчик сообщил составной набор, Z-жест важнее бокового: это устраняет
+ * выдачу Up/Down/Left/Right вместо одновременно распознанного push/pull.
+ * Датчик не сообщает порядок установки битов, поэтому это явная политика
+ * драйвера, а не восстановленная временная последовательность. */
 static gesture_t decode_gesture(uint8_t flag1, uint8_t flag2) {
     gesture_t g;
 
-    if      (flag1 & GES_UP)        g = PAJ_DIR_UP;
-    else if (flag1 & GES_DOWN)      g = PAJ_DIR_DOWN;
-    else if (flag1 & GES_LEFT)      g = PAJ_DIR_LEFT;
-    else if (flag1 & GES_RIGHT)     g = PAJ_DIR_RIGHT;
-    else if (flag1 & GES_FORWARD)   g = GESTURE_FORWARD;
-    else if (flag1 & GES_BACKWARD)  g = GESTURE_BACKWARD;
-    else if (flag1 & GES_CW)        g = PAJ_DIR_CW;
-    else if (flag1 & GES_CCW)       g = PAJ_DIR_CCW;
+    if      (flag1 & GES_FORWARD)    g = GESTURE_FORWARD;
+    else if (flag1 & GES_BACKWARD)   g = GESTURE_BACKWARD;
+    else if (flag1 & GES_CW)         g = PAJ_DIR_CW;
+    else if (flag1 & GES_CCW)        g = PAJ_DIR_CCW;
     else if (flag2 & INT2_WAVE_FLAG) g = GESTURE_WAVE;
-    else                            g = GESTURE_NONE;
+    else if (flag1 & GES_UP)         g = PAJ_DIR_UP;
+    else if (flag1 & GES_DOWN)       g = PAJ_DIR_DOWN;
+    else if (flag1 & GES_LEFT)       g = PAJ_DIR_LEFT;
+    else if (flag1 & GES_RIGHT)      g = PAJ_DIR_RIGHT;
+    else                             g = GESTURE_NONE;
 
     return g;
 }
 
-/* Чтение флагов жеста (REG_INT_FLAG1 + REG_INT_FLAG2) с декодированием.
- * ВНИМАНИЕ: чтение этих регистров сбрасывает флаги в датчике, поэтому
- * найденный жест кладётся в кэш — читатель заберёт его paj_readGesture().
- * Возвращает: true если I2C успешен (независимо от наличия жеста). */
-static bool poll_gesture(void) {
-    uint8_t f1, f2;
-    if (!rd(PAJ_B0, REG_INT_FLAG1, &f1)) {
-        return false;
-    }
-    if (!rd(PAJ_B0, REG_INT_FLAG2, &f2)) {
+/* Burst-read 0x43..0x44 за одну I2C-транзакцию (datasheet, Burst Read).
+ * В Lite-варианте I2C-библиотеки остаются два чтения; f1 сохраняется даже
+ * при ошибке f2, потому что успешное чтение 0x43 уже очистило его флаги. */
+static bool read_gesture_flags(uint8_t *f1, uint8_t *f2) {
+    *f1 = 0;
+    *f2 = 0;
+    if (!bank_sel(PAJ_B0)) {
         return false;
     }
 
-    gesture_t g = decode_gesture(f1, f2);
+    uint8_t st;
+#ifndef I2C_DISABLE_BUFFER_API
+    uint8_t flags[2] = {0, 0};
+    st = i2c_read_buffer(PAJ7620_I2C_ADDR, REG_INT_FLAG1, flags, 2);
+    *f1 = flags[0];
+    *f2 = flags[1];
+#else
+    st = i2c_read_register(PAJ7620_I2C_ADDR, REG_INT_FLAG1, f1);
+    if (st == I2C_OK) {
+        st = i2c_read_register(PAJ7620_I2C_ADDR, REG_INT_FLAG2, f2);
+    }
+#endif
+    if (st != I2C_OK) {
+        note_i2c(st);
+        return false;
+    }
+    return true;
+}
+
+/* Сравнение меток времени корректно при переполнении uint32_t, если окно
+ * короче 2^31 мс (конфигурация ограничивает окна намного строже). */
+static bool time_reached(uint32_t now_ms, uint32_t deadline_ms) {
+    return (int32_t)(now_ms - deadline_ms) >= 0;
+}
+
+static bool is_directional(gesture_t g) {
+    return g == GESTURE_UP || g == GESTURE_DOWN ||
+           g == GESTURE_LEFT || g == GESTURE_RIGHT;
+}
+
+/* Публикация единственного готового результата и запуск cooldown. */
+static void publish_gesture(gesture_t g, uint32_t now_ms) {
+    g_gesture           = g;
+    g_has_gesture       = 1;
+    g_pending_gesture   = GESTURE_NONE;
+    g_cooldown_until_ms = now_ms + (uint32_t)PAJ_GESTURE_COOLDOWN_MS;
+}
+
+/* Entry-фильтр и cooldown. Вызов с GESTURE_NONE нужен для подтверждения
+ * ранее сохранённого бокового жеста по истечении временного окна. */
+static void filter_gesture(gesture_t g, uint32_t now_ms) {
+    if (!time_reached(now_ms, g_cooldown_until_ms)) {
+        g_pending_gesture = GESTURE_NONE;
+        return;                       /* флаги уже прочитаны и очищены */
+    }
+
+    if (g == GESTURE_FORWARD || g == GESTURE_BACKWARD) {
+        publish_gesture(g, now_ms);   /* Z-жест отменяет бокового кандидата */
+        return;
+    }
+
+    if (is_directional(g)) {
+#if PAJ_GESTURE_CONFIRM_MS == 0
+        publish_gesture(g, now_ms);
+#else
+        if (g_pending_gesture != (uint8_t)g) {
+            g_pending_gesture     = (uint8_t)g;
+            g_pending_deadline_ms = now_ms + (uint32_t)PAJ_GESTURE_CONFIRM_MS;
+        } else if (time_reached(now_ms, g_pending_deadline_ms)) {
+            publish_gesture(g, now_ms);
+        }
+#endif
+        return;
+    }
+
     if (g != GESTURE_NONE) {
+        publish_gesture(g, now_ms);   /* CW/CCW/WAVE не задерживаем */
+        return;
+    }
+
+#if PAJ_GESTURE_CONFIRM_MS != 0
+    if (g_pending_gesture != GESTURE_NONE &&
+        time_reached(now_ms, g_pending_deadline_ms)) {
+        publish_gesture((gesture_t)g_pending_gesture, now_ms);
+    }
+#endif
+}
+
+/* Совместимый непосредственный опрос для paj_available()/clearInterrupt().
+ * Непрочитанный кэш больше не перезаписывается новым событием. */
+static bool poll_gesture(void) {
+    uint8_t f1, f2;
+    bool ok = read_gesture_flags(&f1, &f2);
+    gesture_t g = decode_gesture(f1, f2);
+
+    if (g != GESTURE_NONE && !g_has_gesture) {
         g_gesture     = g;
         g_has_gesture = 1;
 #ifdef PAJ7620U2_DEBUG
         printf("GES: raw=%02X/%02X -> %d\r\n", f1, f2, (int)g);
 #endif
     }
-    return true;
+    return ok;
 }
 
 /* ============================================================================
@@ -489,20 +608,27 @@ static bool poll_gesture(void) {
 
 #if PAJ_ENABLE_CALIBRATION
 
-/* Целочисленный квадратный корень (алгоритм Ньютона).
- * Используется при калибровке для вычисления σ.
- * Возвращает: floor(√n). */
+/* Целочисленный квадратный корень без деления (поразрядный restoring
+ * algorithm). В отличие от итерации Ньютона не вызывает __divsi3/__udivsi3.
+ * Возвращает floor(√n); используется только при калибровке. */
 static uint8_t isqrt(uint16_t n) {
-    if (n == 0) {
-        return 0;
+    uint32_t value = n;
+    uint32_t root = 0;
+    uint32_t bit = 1UL << 14;       /* старшая степень четырёх для uint16_t */
+
+    while (bit > value) {
+        bit >>= 2;
     }
-    uint16_t x = n;
-    uint16_t y = (uint16_t)((x + 1) / 2);
-    while (y < x) {
-        x = y;
-        y = (uint16_t)((x + n / x) / 2);
+    while (bit != 0) {
+        if (value >= root + bit) {
+            value -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
     }
-    return (uint8_t)x;
+    return (uint8_t)root;
 }
 
 /* Сортировка вставками для uint8_t (используется только при калибровке).
@@ -551,7 +677,7 @@ static bool calibrate_proximity(void) {
         Delay_Ms(PAJ_CAL_INTERVAL_MS);
     }
 
-    if (valid < PAJ_CAL_SAMPLES / 2) {
+    if (valid < (PAJ_CAL_SAMPLES >> 1)) {
         g_cal_valid = 0;
 #ifdef PAJ7620U2_DEBUG
         printf("CAL: no PS data (valid=%d), keep cfg thresholds %d/%d\r\n",
@@ -560,26 +686,30 @@ static bool calibrate_proximity(void) {
         return true;
     }
 
-    /* Медиана (чётное число замеров — среднее двух центральных). */
+    /* Медиана: деление на степень двух заменено сдвигами. */
     sort_u8(buf, valid);
+    uint8_t middle = valid >> 1;
     uint8_t median;
     if (valid & 1) {
-        median = buf[valid / 2];
+        median = buf[middle];
     } else {
-        median = (uint8_t)(((uint16_t)buf[valid / 2 - 1] + (uint16_t)buf[valid / 2]) / 2);
+        median = (uint8_t)(((uint16_t)buf[middle - 1] + buf[middle]) >> 1);
     }
 
-    /* Дисперсия от медианы (с отклонением /4, чтобы избежать переполнения). */
+    /* Дисперсия от медианы. Модуль отклонения перед >>2 сохраняет то же
+     * округление к нулю, что и прежнее знаковое деление d / 4. */
     uint32_t sum_sq = 0;
     for (uint8_t i = 0; i < valid; i++) {
-        int16_t d  = (int16_t)buf[i] - (int16_t)median;
-        int16_t d4 = d / 4;
+        uint16_t d = (buf[i] >= median) ? (uint16_t)(buf[i] - median)
+                                        : (uint16_t)(median - buf[i]);
+        uint16_t d4 = d >> 2;
         sum_sq += (uint16_t)(d4 * d4);
     }
-    uint8_t sigma = (uint8_t)(isqrt((uint16_t)(sum_sq / valid)) * 4);
+    uint16_t variance = (uint16_t)udiv32_u16(sum_sq, valid);
+    uint8_t sigma = (uint8_t)(isqrt(variance) * 4);
 
     uint16_t entry  = (uint16_t)median + (uint16_t)PAJ_CAL_SIGMA_COEFF * sigma;
-    uint16_t exit_th = entry * 3 / 4;   /* гистерезис: выход ниже входа */
+    uint16_t exit_th = (entry * 3) >> 2; /* гистерезис: выход ниже входа */
 
     if (entry > PAJ_CAL_PROX_MAX)      entry = PAJ_CAL_PROX_MAX;
     if (entry < PAJ_CAL_PROX_MIN)      entry = PAJ_CAL_PROX_MIN;
@@ -706,7 +836,50 @@ bool paj_shutdown(void) {
     return true;
 }
 
+bool paj_poll(uint32_t now_ms) {
+    if (g_has_gesture) {
+        return true;                  /* не перезаписываем непрочитанный результат */
+    }
+    if (!time_reached(now_ms, g_next_poll_ms)) {
+        return false;                 /* ни I2C, ни активного ожидания */
+    }
+    g_next_poll_ms = now_ms + (uint32_t)PAJ_POLL_INTERVAL_MS;
+
+    uint8_t f1, f2;
+    bool ok = read_gesture_flags(&f1, &f2);
+    filter_gesture(decode_gesture(f1, f2), now_ms);
+
+    if (!ok) {
+        /* Новый API не скрывает длительную переинициализацию внутри опроса. */
+        g_last_error = PAJ_ERR_I2C;
+        if (g_reinit_count < PAJ_RETRY_LIMIT) {
+            g_reinit_count++;
+        }
+        if (g_reinit_count >= PAJ_RETRY_LIMIT) {
+            g_last_error = PAJ_ERR_SENSOR_HANG;
+        }
+        return g_has_gesture != 0;    /* частично прочитанный f1 не теряем */
+    }
+
+    g_reinit_count = 0;
+    g_last_error   = PAJ_ERR_NONE;
+    return g_has_gesture != 0;
+}
+
+gesture_t paj_takeGesture(void) {
+    if (!g_has_gesture) {
+        return GESTURE_NONE;
+    }
+    gesture_t g = g_gesture;
+    g_gesture     = GESTURE_NONE;
+    g_has_gesture = 0;
+    return g;
+}
+
 bool paj_available(void) {
+    if (g_has_gesture) {
+        return true;
+    }
     if (!poll_gesture()) {
         g_last_error = PAJ_ERR_I2C;
         recover_sensor();

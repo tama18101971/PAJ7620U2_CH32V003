@@ -101,6 +101,22 @@
 #endif
 
 /* ---------------------------------------------------------------------------
+ * Неблокирующий опрос и программная фильтрация жестов (paj_poll)
+ *
+ * Метку времени даёт приложение: драйвер не захватывает SysTick/TIMx и не
+ * конфликтует с Delay_Ms(). Все интервалы должны быть меньше 2^31 мс.
+ * ------------------------------------------------------------------------- */
+#ifndef PAJ_POLL_INTERVAL_MS
+#define PAJ_POLL_INTERVAL_MS            5     /* 200 Гц при 120 Гц у датчика */
+#endif
+#ifndef PAJ_GESTURE_CONFIRM_MS
+#define PAJ_GESTURE_CONFIRM_MS          40    /* entry-фильтр Up/Down/Left/Right */
+#endif
+#ifndef PAJ_GESTURE_COOLDOWN_MS
+#define PAJ_GESTURE_COOLDOWN_MS         150   /* подавление обратного дребезга */
+#endif
+
+/* ---------------------------------------------------------------------------
  * Тайминги
  * ------------------------------------------------------------------------- */
 
@@ -208,6 +224,15 @@
 #endif
 #if (PAJ_RETRY_LIMIT < 1) || (PAJ_RETRY_LIMIT > 255)
 #error "PAJ_RETRY_LIMIT must be in range 1..255"
+#endif
+#if (PAJ_POLL_INTERVAL_MS < 1) || (PAJ_POLL_INTERVAL_MS > 100)
+#error "PAJ_POLL_INTERVAL_MS must be in range 1..100"
+#endif
+#if (PAJ_GESTURE_CONFIRM_MS < 0) || (PAJ_GESTURE_CONFIRM_MS > 1000)
+#error "PAJ_GESTURE_CONFIRM_MS must be in range 0..1000"
+#endif
+#if (PAJ_GESTURE_COOLDOWN_MS < 0) || (PAJ_GESTURE_COOLDOWN_MS > 2000)
+#error "PAJ_GESTURE_COOLDOWN_MS must be in range 0..2000"
 #endif
 #if (PAJ_INT_MODE != 0) && (PAJ_INT_MODE != 1)
 #error "PAJ_INT_MODE must be 0 or 1"

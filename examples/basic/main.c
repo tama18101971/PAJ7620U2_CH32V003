@@ -32,6 +32,31 @@
 /* Обработчики прерываний (обязательны для CH32V003) */
 void NMI_Handler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 void HardFault_Handler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void TIM2_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+
+/* Независимая от Delay_Ms() временная база: TIM2 каждую 1 мс увеличивает
+ * программный счётчик. SysTick остаётся полностью в распоряжении SDK. */
+static volatile uint32_t g_millis;
+
+static void timebase_init(void) {
+    RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);
+
+    TIM_TimeBaseInitTypeDef tim;
+    TIM_TimeBaseStructInit(&tim);
+    tim.TIM_Prescaler = (uint16_t)(SystemCoreClock / 1000000UL - 1UL);
+    tim.TIM_Period    = 1000 - 1;
+    TIM_TimeBaseInit(TIM2, &tim);
+    TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
+    TIM_ITConfig(TIM2, TIM_IT_Update, ENABLE);
+
+    NVIC_InitTypeDef nvic = {0};
+    nvic.NVIC_IRQChannel                   = TIM2_IRQn;
+    nvic.NVIC_IRQChannelPreemptionPriority = 1;
+    nvic.NVIC_IRQChannelSubPriority        = 0;
+    nvic.NVIC_IRQChannelCmd                = ENABLE;
+    NVIC_Init(&nvic);
+    TIM_Cmd(TIM2, ENABLE);
+}
 
 /* Вывод имени распознанного жеста в UART (общий код для polling/interrupt) */
 static void print_gesture(gesture_t g) {
@@ -49,27 +74,32 @@ static void print_gesture(gesture_t g) {
     }
 }
 
-/* Опрашивание датчика и вывод результата.
- * Цикл ограничен: датчик хранит только последний жест, зависшая шина не
- * должна превращать обработчик в вечный цикл. */
+/* Сброс стартовых флагов без печати и без блокирующего ожидания жеста. */
 static void drain_sensor(void) {
     uint8_t guard = 8;
     while (guard-- && paj_available()) {
-        gesture_t g = paj_readGesture();
-        if (g != GESTURE_NONE) {
-            print_gesture(g);
-        }
+        (void)paj_takeGesture();
     }
 }
 
 /* Диагностика отказа датчика и попытка восстановления. */
 static void handle_sensor_failure(void) {
-    printf("SENSOR HANG (i2c=%d, reinit=%d), re-init...\r\n",
+    printf("SENSOR HANG (i2c=%d, failures=%d), re-init...\r\n",
            paj_getLastI2CStatus(), paj_getReinitCount());
     if (paj_init()) {
         printf("Sensor recovered.\r\n");
     } else {
         printf("Re-init failed (err=%d)\r\n", paj_getLastError());
+    }
+}
+
+/* Один неблокирующий шаг обработки. Восстановление после неисправности
+ * выполняется явно и не скрыто внутри регулярного опроса. */
+static void service_sensor(void) {
+    if (paj_poll(g_millis)) {
+        print_gesture(paj_takeGesture());
+    } else if (paj_getLastError() == PAJ_ERR_SENSOR_HANG) {
+        handle_sensor_failure();
     }
 }
 
@@ -105,6 +135,7 @@ static void demo_proximity(void) {
 int main(void) {
     SystemCoreClockUpdate();
     Delay_Init();
+    timebase_init();
     USART_Printf_Init(115200);
     printf("PAJ7620U2 gesture driver init...\r\n");
 
@@ -154,43 +185,23 @@ int main(void) {
     drain_sensor();
 #endif
 
+    /* TIM2 будит МК каждую 1 мс, EXTI будит дополнительно по событию INT.
+     * paj_poll() сам ограничивает I2C-опрос интервалом 5 мс; подтверждение
+     * бокового жеста завершается по времени даже без нового фронта INT. */
+    while (1) {
+        __WFI();
 #if PAJ_INT_MODE == 1
-    /* ========================================================================
-     * INTERRUPT MODE
-     *
-     * Main loop засыпает (__WFI) пока ISR не установит g_paj_int_flag.
-     * Прерывание срабатывает при распознавании жеста, разрешённого масками
-     * (falling edge на INT pin). После пробуждения читаем жест штатным API.
-     * ======================================================================== */
-    while (1) {
-        while (g_paj_int_flag == 0) {
-            __WFI();
-        }
         g_paj_int_flag = 0;
-
-        if (paj_available()) {
-            gesture_t g = paj_readGesture();
-            print_gesture(g);
-            drain_sensor();
-        } else if (paj_getLastError() == PAJ_ERR_SENSOR_HANG) {
-            handle_sensor_failure();
-        }
-    }
-
-#else
-    /* ========================================================================
-     * POLLING MODE
-     * ======================================================================== */
-    while (1) {
-        if (paj_available()) {
-            gesture_t g = paj_readGesture();
-            print_gesture(g);
-            drain_sensor();
-        } else if (paj_getLastError() == PAJ_ERR_SENSOR_HANG) {
-            handle_sensor_failure();
-        }
-    }
 #endif
+        service_sensor();
+    }
+}
+
+void TIM2_IRQHandler(void) {
+    if (TIM_GetITStatus(TIM2, TIM_IT_Update) != RESET) {
+        TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
+        g_millis++;
+    }
 }
 
 void NMI_Handler(void) {}
