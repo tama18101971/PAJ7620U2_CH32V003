@@ -471,14 +471,21 @@ static void recover_sensor(void) {
  * Подстановка выполняется на этапе компиляции: при PAJ_GESTURE_ROTATE=0
  * макросы тождественны и код не меняется. Модуль, повёрнутый на 90° по
  * часовой стрелке, «ось вверх» смотрит вправо, поэтому жест, который датчик
- * называет UP, физически является RIGHT (и так далее по кругу). */
+ * называет UP, физически является RIGHT (и так далее по кругу).
+ *
+ * CW/CCW НЕ переназначаются ни при каком повороте: направление обхода
+ * окружности сохраняется при повороте системы координат в плоскости
+ * изображения (поворот — невырожденное преобразование с det=+1, оно не
+ * меняет ориентацию плоскости). Инверсия CW/CCW нужна только при зеркальном
+ * монтаже (датчик смотрит «изнутри»), но зеркало не выражается никаким
+ * значением PAJ_GESTURE_ROTATE — такую компоновку правьте вручную. */
 #if PAJ_GESTURE_ROTATE == 1
 #  define PAJ_DIR_UP        GESTURE_RIGHT
 #  define PAJ_DIR_DOWN      GESTURE_LEFT
 #  define PAJ_DIR_LEFT      GESTURE_UP
 #  define PAJ_DIR_RIGHT     GESTURE_DOWN
-#  define PAJ_DIR_CW        GESTURE_CCW
-#  define PAJ_DIR_CCW       GESTURE_CW
+#  define PAJ_DIR_CW        GESTURE_CW
+#  define PAJ_DIR_CCW       GESTURE_CCW
 #elif PAJ_GESTURE_ROTATE == 2
 #  define PAJ_DIR_UP        GESTURE_DOWN
 #  define PAJ_DIR_DOWN      GESTURE_UP
@@ -491,8 +498,8 @@ static void recover_sensor(void) {
 #  define PAJ_DIR_DOWN      GESTURE_RIGHT
 #  define PAJ_DIR_LEFT      GESTURE_DOWN
 #  define PAJ_DIR_RIGHT     GESTURE_UP
-#  define PAJ_DIR_CW        GESTURE_CCW
-#  define PAJ_DIR_CCW       GESTURE_CW
+#  define PAJ_DIR_CW        GESTURE_CW
+#  define PAJ_DIR_CCW       GESTURE_CCW
 #else
 #  define PAJ_DIR_UP        GESTURE_UP
 #  define PAJ_DIR_DOWN      GESTURE_DOWN
@@ -754,7 +761,12 @@ static bool calibrate_proximity(void) {
         sum_sq += (uint16_t)(d4 * d4);
     }
     uint16_t variance = (uint16_t)udiv32_u16(sum_sq, valid);
-    uint8_t sigma = (uint8_t)(isqrt(variance) * 4);
+    /* isqrt(variance) доходит до ~89, поэтому *4 может превысить 255 (до 356)
+     * при очень шумном замере. Насыщаем, а не даём uint8_t молча обернуться:
+     * завёрнутое значение занижало бы порог и на шумной засветке порог
+     * оказывался бы НИЖЕ, чем на чистой. */
+    uint16_t sigma_x4 = (uint16_t)isqrt(variance) * 4u;
+    uint8_t  sigma    = (sigma_x4 > 255u) ? (uint8_t)255u : (uint8_t)sigma_x4;
 
     uint16_t entry  = (uint16_t)median + (uint16_t)PAJ_CAL_SIGMA_COEFF * sigma;
     uint16_t exit_th = (entry * 3) >> 2; /* гистерезис: выход ниже входа */

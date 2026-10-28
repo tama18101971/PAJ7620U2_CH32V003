@@ -58,14 +58,27 @@
 
 #define REG_ENABLE             0x72  /* бит0 = 1: включить PAJ7620U2 */
 #define REG_PS_GAIN            0x44  /* биты[5:0] — усиление PS (0 = 1x, 1 = 2x) */
-#define REG_STEP_S1_L          0x67  /* IDLE S1 Step [7:0]  (S1, response factor) */
-#define REG_STEP_S1_H          0x68  /* IDLE S1 Step [15:8] */
-#define REG_STEP_S2_L          0x69  /* IDLE S2 Step [7:0]  (S2, response factor) */
-#define REG_STEP_S2_H          0x6A  /* IDLE S2 Step [15:8] */
-#define REG_STEP_OPS1_L        0x6B  /* OPtoS1 Step [7:0]   (время OP -> S1) */
-#define REG_STEP_OPS1_H        0x6C  /* OPtoS1 Step [15:8] */
-#define REG_STEP_S1S2_L        0x6D  /* S1toS2 Step [7:0]   (время S1 -> S2) */
-#define REG_STEP_S1S2_H        0x6E  /* S1toS2 Step [15:8] */
+
+/* Тайминги автомата состояний (Operation → S1 → S2). Имена и назначение — по
+ * V0.8 (docs/PAJ7620U2_DS.pdf, стр. 40); в V0.7 те же адреса названы
+ * «IDLE S1/S2 Step, OPtoS1/S1toS2 Step» (response factor, см.
+ * docs/PAJ7620U2_datasheet.pdf, стр. 7/11) — старые имена макросов сохранены.
+ *
+ * R_IDLE_TIME задаёт простой до попытки ухода в сон в рабочем состоянии;
+ * R_Obj_TIME_1/2 — время (в кадрах отчёта) до входа в слабый/глубокий сон.
+ * После пробуждения из S1/S2 датчик замедляется, и быстрые жесты теряются:
+ * если жест «не срабатывает» первым после паузы, увеличивайте R_Obj_TIME_*
+ * (значения в g_init_seq/g_gesture_seq в paj7620.c). */
+#define REG_IDLE_TIME_L        0x65  /* R_IDLE_TIME[7:0] — idle time, normal op */
+#define REG_IDLE_TIME_H        0x66  /* R_IDLE_TIME[15:8] */
+#define REG_STEP_S1_L          0x67  /* V0.8: R_IDLE_TIME_SLEEP_1[7:0] */
+#define REG_STEP_S1_H          0x68  /* V0.8: R_IDLE_TIME_SLEEP_1[15:8] */
+#define REG_STEP_S2_L          0x69  /* V0.8: R_IDLE_TIME_SLEEP_2[7:0] */
+#define REG_STEP_S2_H          0x6A  /* V0.8: R_IDLE_TIME_SLEEP_2[15:8] */
+#define REG_STEP_OPS1_L        0x6B  /* V0.8: R_Obj_TIME_1[7:0] — вход в слабый сон */
+#define REG_STEP_OPS1_H        0x6C  /* V0.8: R_Obj_TIME_1[15:8] */
+#define REG_STEP_S1S2_L        0x6D  /* V0.8: R_Obj_TIME_2[7:0] — вход в глубокий сон */
+#define REG_STEP_S1S2_H        0x6E  /* V0.8: R_Obj_TIME_2[15:8] */
 
 /* ============================================================================
  * Битовые определения
