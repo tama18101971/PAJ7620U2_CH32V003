@@ -19,13 +19,14 @@ pio run -t upload  # flash via WCH-Link
 pio run -t size    # size report
 ```
 
-CI (`.github/workflows/ci.yml`) builds nine config variants with
+CI (`.github/workflows/ci.yml`) builds 14 config variants with
 `-Wextra -Werror` on project sources (`PLATFORMIO_BUILD_SRC_FLAGS`, so SDK
 and library sources are not affected) plus a size-ceiling guard
 (RAM ≤ 600 B, flash ≤ 13000 B for the default build).
 
 Variants: default, polling, no-calibration, debug-output, external-exti-isr,
-rotated-module, proximity-demo, no-ps-mode, no-own-systick.
+rotated-module, proximity-demo, gesture-trace, no-ps-mode, no-own-systick,
+reinit-threshold-1, calibrate-on-init, axis-thresholds-tuned, accept-ambiguous.
 
 No test framework configured. Manual testing via UART output (PD5, 115200 baud).
 
@@ -51,9 +52,9 @@ No test framework configured. Manual testing via UART output (PD5, 115200 baud).
 | `src/paj7620.c` | Driver implementation (register tables, wake-up, gestures, calibration) |
 | `src/paj7620_regs.h` | PAJ7620U2 register map (bank 0/1, flag bits) |
 | `src/paj_int_config.h` / `src/paj_int_config.c` | EXTI setup (INT → PC3) |
-| `examples/basic/main.c` | Example usage (polling + interrupt + optional proximity demo) |
+| `examples/basic/main.c` | Non-blocking polling/interrupt example, TIM2 ms timebase, trace and proximity demo |
 | `platformio.ini` | Build config, library deps (`I2C-CH32V003`, pinned `#v7.1.0`), LTO on |
-| `library.json` | PlatformIO library manifest (v1.0.0, excludes `examples/`) |
+| `library.json` | PlatformIO library manifest (v1.1.0, excludes `examples/`) |
 | `INTEGRATION_RU.md` | APDS-9960 → PAJ7620U2 migration, incl. DriverMD6 |
 | `LICENSE` | MIT license |
 | `.clangd` | Removes the RISC-V target flags from the compile DB for native clang/clangd |
@@ -94,11 +95,18 @@ C projects need an LSP backend; without one the symbol tools
   `REG_INT_FLAG2` (0x44). The driver only decodes flags — there is no FIFO,
   no pixel data, and `APDS_FIFO_*` / `APDS_GESTURE_SENSITIVITY` analogues do
   not exist.
-- **Reading 0x43/0x44 clears the flags.** Therefore `paj_available()` decodes
-  the gesture into a cache (`g_gesture`/`g_has_gesture`) and
-  `paj_readGesture()` returns the cached value first. Any new code that reads
-  the flag registers must go through `poll_gesture()`, or it will destroy a
-  pending gesture.
+- **Reading 0x43/0x44 clears the flags.** `read_gesture_flags()` performs a
+  burst read where the I2C library supports it and falls back to two reads in
+  `I2C_LITE` mode. The gesture is cached in `g_gesture`/`g_has_gesture`; an
+  unread result is never overwritten. Any new code that reads the flag
+  registers must go through this path or it will destroy a pending gesture.
+- **`paj_poll(now_ms)` is the recommended non-blocking path.** It reads flags
+  at most every `PAJ_POLL_INTERVAL_MS` (5 ms), holds directional gestures for
+  `PAJ_GESTURE_CONFIRM_MS` (40 ms), lets Forward/Backward cancel a pending
+  direction, and applies `PAJ_GESTURE_COOLDOWN_MS` (150 ms). `paj_takeGesture()`
+  consumes the one ready slot. `paj_available()`/`paj_readGesture()` remain as
+  legacy immediate/blocking APIs. Every EXTI design must still call
+  `paj_poll()` regularly so a directional window completes without a new edge.
 - **Two register banks** (selected by 0xEF). `bank_sel()` caches the current
   bank in `g_bank` to avoid an extra I2C transaction per access;
   `PAJ_BANK_UNKNOWN` forces re-selection (set after wake-up/suspend).
@@ -109,6 +117,24 @@ C projects need an LSP backend; without one the symbol tools
   bank-select writes removed (handled by `bank_sel()`) and the `Enable` write
   (`bank1 0x72 = 0x01`) removed because `paj_wakeup()` and
   `enable_sensor()` need it separately.
+- **The gesture axis thresholds are NOT in the datasheet init array.** Bank 0
+  `0x93` (`R_XDirectionThd`, left/right) and `0x94` (`R_YDirectionThd`,
+  up/down) are documented in the "Register Map" but absent from the
+  "i. Initial" write array, so they keep their power-on value and were
+  untunable. Measured on the bench module: `0x93=0x0D`, `0x94=0x0A` — those are
+  now `PAJ_XDIR_THRESHOLD` / `PAJ_YDIR_THRESHOLD` and are written explicitly by
+  `apply_axis_thresholds()` (range 0..0x1F, validated by `#error`). Every other
+  gesture threshold (`0x90`, `0x95`..`0x97`, `0x9A`, `0x9C`, `0x9F`, `0xCF`,
+  `0xD0`) is in the init array.
+- **Ambiguous flag reads are rejected.** The sensor sets flag bits
+  independently, so a weak signal can make one gesture produce several bits —
+  `0x43 = 0x3F` (up+down+left+right+forward+backward) was observed on the
+  bench. `flags_contradictory()` detects that (both halves of an antipodal
+  pair are set) and, with `PAJ_REJECT_AMBIGUOUS=1` (default), such reads
+  return `GESTURE_NONE` instead of the lowest set bit, which used to be a
+  confidently wrong gesture. Counted in `g_ambiguous`, read via
+  `paj_getAmbiguousCount()`. Rising counts point at hardware/signal quality
+  (IR LED rail, hand distance, gesture speed), not at the driver.
 - **Power states differ from the APDS driver.** `paj_shutdown()` performs a
   real suspend (Enable = 0 + write 0x01 to `0x03`), so `paj_wakeup()` must run
   the I2C wake-up command. `paj_sleep()` only clears Enable and keeps the
@@ -120,19 +146,32 @@ C projects need an LSP backend; without one the symbol tools
   bank 0 register `0x00` for `0x20` and ignores expected NACKs; a readback of
   `0xFF` means "something else answers at 0x73" → `PAJ_ERR_INVALID_ID`
   (terminal, `paj_init()` does not retry it).
-- **Calibration** runs in `paj_init()` → `calibrate_proximity()`: samples
-  `REG_PS_DATA` (0x6C), takes the median + N·σ and stores the thresholds for
-  later `sensor_reinit()` calls. The PS block is only updated in proximity
-  mode, so in gesture mode the samples are zero and the configured defaults
-  stay in place — that is the expected default behaviour, not a bug.
-  Disable with `PAJ_ENABLE_CALIBRATION=0` (`paj_recalibrate()` then returns
-  `PAJ_ERR_UNSUPPORTED`).
+- **Calibration does NOT run in `paj_init()`** (`PAJ_CALIBRATE_ON_INIT=0`,
+  default). In gesture mode the sensor does not update `REG_PS_DATA` (0x6C),
+  so the register returns a value that tracks ambient light rather than the
+  proximity signal. Measured: one boot produced `median=45 sigma=0 -> 45/33`,
+  the next discarded every sample and kept `200/64`. Calibrate explicitly with
+  `paj_setProximityMode()` + `paj_recalibrate()`; set `PAJ_CALIBRATE_ON_INIT=1`
+  for the old behaviour. `PAJ_ENABLE_CALIBRATION=0` compiles
+  `paj_recalibrate()` out (it then returns `PAJ_ERR_UNSUPPORTED`).
+- **`poll_gesture()` reads `0x43` before `0x44` and decodes `0x43` separately.**
+  A failing `0x44` read must not discard a gesture that has already been read
+  out of the sensor — the flags are cleared on read and cannot be re-read. It
+  costs only the wave flag; `paj_available()` and `paj_readGesture()` still
+  hand the cached gesture to the caller and report `PAJ_ERR_I2C`.
 - **I2C error policy**: a single failed register access is not retried inside
   `rd()`/`wr()`; bus-level recovery is the I2C library's job. Sensor-level
   recovery (`recover_sensor()` → `sensor_reinit()`) is attempted from
   `paj_available()` and `paj_readGesture()` up to `PAJ_RETRY_LIMIT` times,
   then reported as `PAJ_ERR_SENSOR_HANG` (deliberately not masked as
   `PAJ_ERR_I2C`).
+- **A full re-init needs `PAJ_REINIT_THRESHOLD` consecutive failures** (3), not
+  one. `g_fail_streak` counts failures and is cleared by any successful
+  `poll_gesture()`. Rationale: a lone NACK is normal on a marginal bus (the
+  sensor is busy with AE, or the transaction collides with the LED pulse);
+  re-initialising on it costs milliseconds during which the sensor is silent
+  and every gesture is lost — a self-inflicted instability. Below the
+  threshold the fault is only visible through `paj_getLastI2CStatus()`.
 - **Void-API interrupt functions** (`paj_enableInterrupt`,
   `paj_disableInterrupt`, `paj_clearInterrupt`) record `PAJ_ERR_I2C` on
   failure and never overwrite `g_last_error` on success.
@@ -153,14 +192,23 @@ C projects need an LSP backend; without one the symbol tools
   local decoupling. Marginal sensor modules fail to detect fast gestures.
 - The sensor keeps only the LATEST gesture: polling slower than the gesture
   rate drops gestures. The INT-driven path does not.
+- **The sensor names gestures relative to ITSELF.** Which way is "sensor UP"
+  depends on how the module is mounted (datasheet Figure 4), so until the
+  mounting is known, a physically correct swipe can be reported as a different
+  direction. `PAJ_GESTURE_ROTATE` (0..3) is the software fix; determine it by
+  comparing one physical movement against the module's own axes.
 - `PAJ_ERR_FIFO_OVERFLOW` (value 2) is kept for source compatibility with the
   APDS driver but is never returned — there is no host FIFO.
 - `RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE)` must run before
   `GPIO_EXTILineConfig()`; otherwise the EXTI mapping is silently ignored.
 - The EXTI ISR in `paj_int_config.c` is intentionally **strong**: the
   NoneOS-SDK weak fallback handler is an infinite loop.
-- Reference sizes (examples/basic, LTO on): RAM 508 B, Flash 10804 B. The
-  driver itself is ~1.5 KB of flash and 15 bytes of static RAM.
+- Reference sizes (examples/basic, LTO on): RAM 528 B, Flash 10992 B. The
+  driver itself is about 2 KB of flash and ~32 bytes of static RAM.
+- `PAJ_EXAMPLE_TRACE=1` in `examples/basic` is the bring-up harness: it prints
+  the decoded gesture, `REG_STATE` (0x45), the ambiguous-read counter and the
+  raw 0x93..0xCF register values after `paj_init()`. It is what identified the
+  `0x3F` ambiguity and the untouched `0x93`/`0x94` on the bench.
 
 ## Datasheet sources
 

@@ -5,22 +5,40 @@
 - Datasheet: "The gesture detection interrupt flag will be cleared by reading
   Register Bank 0, Addr 0x43 and 0x44." A read is destructive.
 - Therefore the driver separates *acquire* from *consume*:
-  - `poll_gesture()` reads 0x43 and 0x44, decodes, and stores the result in
-    `g_gesture`/`g_has_gesture`;
-  - `paj_available()` = `poll_gesture()` + "is something pending";
-  - `paj_readGesture()` = take the cache, or block-wait for a new one;
-  - `paj_clearInterrupt()` calls `poll_gesture()` too, so an INT clear never
-    destroys a gesture that is already in hand.
+  - `read_gesture_flags()` reads 0x43/0x44 as one burst where the I2C buffer
+    API is available; `I2C_LITE` falls back to two reads;
+  - `paj_available()` is the legacy immediate poll and caches the gesture;
+  - `paj_readGesture()` is the legacy blocking consumer;
+  - `paj_poll(now_ms)` is the recommended non-blocking service and
+    `paj_takeGesture()` consumes its single ready slot;
+  - `paj_clearInterrupt()` also goes through the flag read, so an INT clear
+    never destroys a gesture that is already in hand.
+- A failing second byte costs only the wave flag; a partially read 0x43
+  gesture is retained because it cannot be re-read.
+- An unread cached result is never overwritten.
 - Adding any other 0x43/0x44 read is a bug: it eats the gesture the caller
   was about to receive.
-- Flags are read as two single-register transactions, not one 2-byte block:
-  auto-increment from 0x43 is not documented in the datasheet.
+- Burst read from 0x43 to 0x44 is documented in datasheet V0.8 (Burst Read
+  Protocol), so the default path uses it and saves one transaction.
 
 ## Decode order
 
-`Up, Down, Left, Right, Forward, Backward, CW, CCW`, then wave (`0x44 bit0`) as
-the fallback. First match wins, so multi-bit results are deterministic.
-`forward`/`backward`/`wave` are rotation-independent.
+`Forward, Backward, CW, CCW`, then wave (`0x44 bit0`), then
+`Up, Down, Left, Right`. Z gestures intentionally outrank a simultaneous
+directional bit. The sensor does not expose the time order of flags, so this
+is policy rather than reconstructed sequence. `forward`/`backward`/`wave` are
+rotation-independent.
+
+Before decoding, `flags_contradictory()` rejects a read holding both halves of
+an antipodal pair (`GES_PAIR_*`): one physical gesture cannot be up *and*
+down. Measured ambiguity on the bench was `0x43 = 0x3F`. With
+`PAJ_REJECT_AMBIGUOUS=1` (default) such a read yields `GESTURE_NONE` and
+increments `g_ambiguous` (`paj_getAmbiguousCount()`), because emitting the
+lowest set bit turned indecision into a confidently wrong gesture — the exact
+failure mode users report as unstable recognition. A high counter means weak
+signal (IR LED rail, hand distance, gesture speed) or a bad
+`PAJ_XDIR_THRESHOLD`/`PAJ_YDIR_THRESHOLD`, not a driver bug.
+`PAJ_REJECT_AMBIGUOUS=0` accepts the read and uses the decode priority above.
 
 ## Rotation
 
@@ -31,14 +49,16 @@ rotated 90° CW reports physical UP as chip LEFT, hence
 
 ## Loops and latency
 
-- Idiom: `while (guard-- && paj_available()) paj_readGesture();`
-  (the APDS drain loop keeps working unchanged).
-- The blocking wait polls every ~1 ms; gesture rate is 120 Hz, so a gesture
-  arrives within one poll interval. `PAJ_GESTURE_POLL` is derived from
-  `g_ticks_per_ms`, not from an I2C timing assumption.
-- The sensor keeps only the **latest** gesture: poll slower than the gesture
-  rate and gestures are lost. The INT-driven path loses none.
-- `PAJ_OWN_SYSTICK=1` starts its own SysTick (HCLK/8, no `Delay_*` inside the
-  loop) because the SDK's `Delay_*` zeroes and stops `SysTick->CNT` on every
-  call — `SysTick->CNT` is not a timebase here. `=0` switches to an iteration
-  budget with `Delay_Ms(1)`.
+- Preferred idiom: `if (paj_poll(now_ms)) g = paj_takeGesture();`
+  with application-supplied monotonic milliseconds.
+- `paj_poll()` reads at most every `PAJ_POLL_INTERVAL_MS` (5 ms), holds
+  directional gestures for `PAJ_GESTURE_CONFIRM_MS` (40 ms), emits Z gestures
+  immediately and applies `PAJ_GESTURE_COOLDOWN_MS` (150 ms) after publication.
+- EXTI is an accelerator, not the service loop: call `paj_poll()` regularly so
+  a directional confirmation window expires without another edge.
+- The sensor and the driver each hold only one latest result, so an unread
+  ready slot can lose newer events. A small queue is not implemented.
+- Legacy `paj_available()`/`paj_readGesture()` retain the immediate/blocking
+  behaviour. `PAJ_OWN_SYSTICK=1` uses SysTick HCLK/8 for the legacy wait;
+  `=0` uses an iteration budget with `Delay_Ms(1)`. No new API path calls
+  `Delay_*`.

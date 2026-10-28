@@ -15,6 +15,7 @@
 #include <debug.h>
 #include "i2c.h"
 #include "paj7620.h"
+#include "paj7620_regs.h"
 
 #if PAJ_INT_MODE == 1
 #include "paj_int_config.h"
@@ -27,6 +28,12 @@
  * paj_recalibrate(): в режиме жестов датчик PS-данные не обновляет. */
 #ifndef PAJ_EXAMPLE_PS_MODE
 #define PAJ_EXAMPLE_PS_MODE    0
+#endif
+
+/* 1 = печатать состояние автомата датчика и счётчики на каждый жест, а после
+ * инициализации вывести фактические пороги gesture engine. */
+#ifndef PAJ_EXAMPLE_TRACE
+#define PAJ_EXAMPLE_TRACE      0
 #endif
 
 /* Обработчики прерываний (обязательны для CH32V003) */
@@ -74,6 +81,47 @@ static void print_gesture(gesture_t g) {
     }
 }
 
+#if PAJ_EXAMPLE_TRACE
+static uint16_t s_gestures;
+
+static uint8_t sensor_state(void) {
+    uint8_t v = 0xFF;
+    if (!paj_readStatus(&v)) {
+        return 0xFF;
+    }
+    return (uint8_t)(v & 0x03);
+}
+
+static void trace_line(const char *tag) {
+    printf("%s ges=%u amb=%u st=%u err=%d i2c=%d reinit=%u\r\n",
+           tag, (unsigned)s_gestures,
+           (unsigned)paj_getAmbiguousCount(), (unsigned)sensor_state(),
+           paj_getLastError(), paj_getLastI2CStatus(),
+           (unsigned)paj_getReinitCount());
+}
+
+/* Фактические пороги gesture engine; bank 0 остаётся выбранным. */
+static void dump_gesture_regs(void) {
+    static const uint8_t regs[] = {
+        0x83, 0x8B, 0x90, 0x93, 0x94, 0x95,
+        0x96, 0x97, 0x9A, 0x9C, 0x9F, 0xCF, 0xD0,
+    };
+    if (i2c_write_register(PAJ7620_I2C_ADDR, REG_BANK_SEL, PAJ_B0) != I2C_OK) {
+        printf("regs: bank0 select failed\r\n");
+        return;
+    }
+    printf("regs:");
+    for (uint8_t i = 0; i < (uint8_t)sizeof(regs); i++) {
+        uint8_t v = 0xFF;
+        if (i2c_read_register(PAJ7620_I2C_ADDR, regs[i], &v) != I2C_OK) {
+            v = 0xFF;
+        }
+        printf(" %02X=%02X", regs[i], v);
+    }
+    printf("\r\n");
+}
+#endif
+
 /* Сброс стартовых флагов без печати и без блокирующего ожидания жеста. */
 static void drain_sensor(void) {
     uint8_t guard = 8;
@@ -97,7 +145,12 @@ static void handle_sensor_failure(void) {
  * выполняется явно и не скрыто внутри регулярного опроса. */
 static void service_sensor(void) {
     if (paj_poll(g_millis)) {
-        print_gesture(paj_takeGesture());
+        gesture_t g = paj_takeGesture();
+        print_gesture(g);
+#if PAJ_EXAMPLE_TRACE
+        s_gestures++;
+        trace_line("HIT");
+#endif
     } else if (paj_getLastError() == PAJ_ERR_SENSOR_HANG) {
         handle_sensor_failure();
     }
@@ -176,6 +229,10 @@ int main(void) {
     printf("PAJ7620U2 ready.\r\n");
 
     Delay_Ms(200);
+
+#if PAJ_EXAMPLE_TRACE
+    dump_gesture_regs();
+#endif
 
     /* Сброс возможных жестов, распознанных во время инициализации */
     drain_sensor();

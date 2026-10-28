@@ -15,8 +15,10 @@ API новой библиотеки повторяет API старой, поэ�
 | `apds_sleep()` | `paj_sleep()` | Снимается бит Enable, конфигурация сохраняется |
 | `apds_wakeup()` | `paj_wakeup()` | Выполняет I2C wake-up — **обязателен после `paj_shutdown()`** |
 | `apds_shutdown()` | `paj_shutdown()` | Enable = 0 + команда suspend (IDD_SUS ~15 мкА) |
-| `apds_available()` | `paj_available()` | Читает флаги жеста; чтение сбрасывает их в датчике, результат кэшируется |
-| `apds_readGesture()` | `paj_readGesture()` | Блокирующая: кэш → ожидание до `PAJ_GESTURE_TIMEOUT_MS` |
+| `apds_available()` | `paj_available()` | Legacy: читает флаги жеста; чтение сбрасывает их в датчике, результат кэшируется |
+| `apds_readGesture()` | `paj_readGesture()` | Legacy: блокирующая, кэш → ожидание до `PAJ_GESTURE_TIMEOUT_MS` |
+| — | `paj_poll(uint32_t now_ms)` | Новый рекомендуемый неблокирующий сервис: расписание, entry-фильтр и cooldown |
+| — | `paj_takeGesture()` | Новый неблокирующий забор единственного готового жеста |
 | `apds_readProximity(uint8_t*)` | `paj_readProximity(uint8_t*)` | Требует режима proximity — см. раздел 5 |
 | `apds_readStatus(uint8_t*)` | `paj_readStatus(uint8_t*)` | Читает регистр состояния автомата датчика (0..2) |
 | `apds_getLastError()` | `paj_getLastError()` | Коды 0/1/3/4/5 совпадают, 2 (`FIFO_OVERFLOW`) не используется |
@@ -60,7 +62,7 @@ gesture engine, пороги FIFO, фильтрация пакетов, чувс
 
 ```ini
 lib_deps =
-    https://github.com/tama18101971/PAJ7620U2_CH32V003.git#v1.0.0   ; было APDS-9960_CH32V003#v1.3.0
+    https://github.com/tama18101971/PAJ7620U2_CH32V003.git#v1.1.0   ; было APDS-9960_CH32V003#v1.3.0
     ...
 
 build_flags =
@@ -150,4 +152,4 @@ if (i2c_init(400000) == I2C_OK && CFG->on_gst) {
    распознаёт жесты (раздел 4).
 5. Сопоставить размер прошивки: при `-DPAJ_ENABLE_CALIBRATION=0` и без
    `printf` драйвер занимает около 2 КБ флэша и ~32 байта RAM с фильтром
-   (эталонная сборка `examples/basic` с LTO: RAM 524 Б, Flash 11244 Б).
+   (эталонная сборка `examples/basic` с LTO: RAM 528 Б, Flash 10992 Б).

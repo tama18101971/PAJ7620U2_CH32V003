@@ -57,6 +57,15 @@
 #define PAJ_GESTURE_ROTATE              0
 #endif
 
+/* 1 (по умолчанию): флаги с обеими частями антагонистической пары
+ * (Up+Down, Left+Right, Forward+Backward, CW+CCW) означают неуверенную
+ * классификацию датчика и отбрасываются. На аппаратуре наблюдалось
+ * 0x43=0x3F; выбор младшего бита давал уверенно неверный жест.
+ * 0: разрешить декодирование такого набора с приоритетом драйвера. */
+#ifndef PAJ_REJECT_AMBIGUOUS
+#define PAJ_REJECT_AMBIGUOUS            1
+#endif
+
 /* ---------------------------------------------------------------------------
  * Пороги proximity (REG_PS_TH_HIGH 0x69 / REG_PS_TH_LOW 0x6A, банк 0)
  *
@@ -71,6 +80,23 @@
 #endif
 
 /* ---------------------------------------------------------------------------
+ * Пороги gesture engine по осям (банк 0)
+ *
+ * 0x93 R_XDirectionThd[4:0] — влево/вправо;
+ * 0x94 R_YDirectionThd[4:0] — вверх/вниз.
+ * Этих регистров нет в официальной initial-таблице, поэтому без явной
+ * записи настройка чувствительности боковых жестов недоступна. Значения по
+ * умолчанию — заводские для проверенного модуля. Меньше — чувствительнее,
+ * больше — устойчивее к шуму, но медленные жесты теряются.
+ * ------------------------------------------------------------------------- */
+#ifndef PAJ_XDIR_THRESHOLD
+#define PAJ_XDIR_THRESHOLD              0x0D
+#endif
+#ifndef PAJ_YDIR_THRESHOLD
+#define PAJ_YDIR_THRESHOLD              0x0A
+#endif
+
+/* ---------------------------------------------------------------------------
  * Калибровка порогов proximity
  *
  * Драйвер снимает PAJ_CAL_SAMPLES замеров REG_PS_DATA, сортирует их,
@@ -79,6 +105,13 @@
  * ------------------------------------------------------------------------- */
 #ifndef PAJ_ENABLE_CALIBRATION
 #define PAJ_ENABLE_CALIBRATION          1
+#endif
+/* 0 (по умолчанию): paj_init() не калибрует proximity. В gesture mode
+ * REG_PS_DATA зависит от засветки и не отражает приближение; калибруйте
+ * явно через paj_setProximityMode() + paj_recalibrate().
+ * 1: прежнее поведение с калибровкой в paj_init(). */
+#ifndef PAJ_CALIBRATE_ON_INIT
+#define PAJ_CALIBRATE_ON_INIT           0
 #endif
 #ifndef PAJ_CAL_SAMPLES
 #define PAJ_CAL_SAMPLES                 16
@@ -147,6 +180,15 @@
 #define PAJ_RETRY_LIMIT                 6
 #endif
 
+/* Число подряд неудачных чтений до полной переинициализации. Одиночный NACK
+ * не должен стирать конфигурацию: wake-up и 47 записей занимают время, в
+ * течение которого жесты теряются. В legacy API порог управляет re-init;
+ * paj_poll() не переинициализирует скрыто, но использует тот же гистерезис
+ * для диагностики отказа. */
+#ifndef PAJ_REINIT_THRESHOLD
+#define PAJ_REINIT_THRESHOLD            3
+#endif
+
 /* ---------------------------------------------------------------------------
  * Режимы работы
  * ------------------------------------------------------------------------- */
@@ -189,14 +231,26 @@
 #if (PAJ_GESTURE_ROTATE < 0) || (PAJ_GESTURE_ROTATE > 3)
 #error "PAJ_GESTURE_ROTATE must be in range 0..3"
 #endif
+#if (PAJ_REJECT_AMBIGUOUS != 0) && (PAJ_REJECT_AMBIGUOUS != 1)
+#error "PAJ_REJECT_AMBIGUOUS must be 0 or 1"
+#endif
 #if (PAJ_PROX_THRESHOLD < 1) || (PAJ_PROX_THRESHOLD > 255)
 #error "PAJ_PROX_THRESHOLD must be in range 1..255"
 #endif
 #if (PAJ_PROX_EXIT_TH < 0) || (PAJ_PROX_EXIT_TH >= PAJ_PROX_THRESHOLD)
 #error "PAJ_PROX_EXIT_TH must be in range 0..PAJ_PROX_THRESHOLD-1"
 #endif
+#if (PAJ_XDIR_THRESHOLD < 0) || (PAJ_XDIR_THRESHOLD > 0x1F)
+#error "PAJ_XDIR_THRESHOLD must be in range 0..0x1F"
+#endif
+#if (PAJ_YDIR_THRESHOLD < 0) || (PAJ_YDIR_THRESHOLD > 0x1F)
+#error "PAJ_YDIR_THRESHOLD must be in range 0..0x1F"
+#endif
 #if (PAJ_ENABLE_CALIBRATION != 0) && (PAJ_ENABLE_CALIBRATION != 1)
 #error "PAJ_ENABLE_CALIBRATION must be 0 or 1"
+#endif
+#if (PAJ_CALIBRATE_ON_INIT != 0) && (PAJ_CALIBRATE_ON_INIT != 1)
+#error "PAJ_CALIBRATE_ON_INIT must be 0 or 1"
 #endif
 #if (PAJ_CAL_SAMPLES < 4) || (PAJ_CAL_SAMPLES > 32)
 #error "PAJ_CAL_SAMPLES must be in range 4..32"
@@ -224,6 +278,9 @@
 #endif
 #if (PAJ_RETRY_LIMIT < 1) || (PAJ_RETRY_LIMIT > 255)
 #error "PAJ_RETRY_LIMIT must be in range 1..255"
+#endif
+#if (PAJ_REINIT_THRESHOLD < 1) || (PAJ_REINIT_THRESHOLD > 255)
+#error "PAJ_REINIT_THRESHOLD must be in range 1..255"
 #endif
 #if (PAJ_POLL_INTERVAL_MS < 1) || (PAJ_POLL_INTERVAL_MS > 100)
 #error "PAJ_POLL_INTERVAL_MS must be in range 1..100"

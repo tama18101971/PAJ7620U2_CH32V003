@@ -28,8 +28,15 @@ Expected NACKs during the wake-up poll are **not** recorded in
 - One failed register access is never retried inside `rd()`/`wr()`; bus-level
   recovery is the I2C library's job.
 - An I2C fault in `paj_available()` or inside `paj_readGesture()` calls
-  `recover_sensor()` → `sensor_reinit()` (full wake-up + `g_init_seq` +
-  calibrated thresholds), at most `PAJ_RETRY_LIMIT` times.
+  `recover_sensor()`, but only after `PAJ_REINIT_THRESHOLD` (3) **consecutive**
+  failures. `g_fail_streak` counts them and any successful `poll_gesture()`
+  zeroes it. A lone NACK is normal on a marginal bus (sensor busy with AE, or
+  the transaction collides with the LED pulse) and re-initialising on it costs
+  milliseconds of silence in which every gesture is lost — a self-inflicted
+  instability. Below the threshold the fault surfaces only through
+  `paj_getLastI2CStatus()`.
+- `recover_sensor()` then calls `sensor_reinit()` (full wake-up + `g_init_seq` +
+  axis/proximity thresholds) at most `PAJ_RETRY_LIMIT` times.
 - `g_reinit_count` survives across faults and is zeroed by any successful
   read; `>= PAJ_RETRY_LIMIT` is the "sensor considered dead" signal that maps
   to `PAJ_ERR_SENSOR_HANG`. `SENSOR_HANG` is deliberately *not* masked as
@@ -37,7 +44,11 @@ Expected NACKs during the wake-up poll are **not** recorded in
   "a read failed and recovery failed".
 - Calibration: a bus fault or too few valid samples is **not** fatal, the
   configured thresholds stay; only a failed write of the computed thresholds
-  returns `false` (the configuration would be incomplete). In gesture mode the
-  PS block is idle, samples are 0, so the defaults are the expected outcome.
+  returns `false` (the configuration would be incomplete).
+- Calibration does **not** run in `paj_init()` by default
+  (`PAJ_CALIBRATE_ON_INIT=0`). In gesture mode the sensor does not update
+  `REG_PS_DATA` (0x6C), so it returns a value tracking ambient light —
+  measured: one boot `median=45 sigma=0 -> 45/33`, the next kept `200/64`.
+  Use `paj_setProximityMode()` + `paj_recalibrate()`.
 - `paj_recalibrate()` with `PAJ_ENABLE_CALIBRATION=0` returns `false` +
   `PAJ_ERR_UNSUPPORTED` rather than pretending to have done something.

@@ -2,14 +2,14 @@
 
 No test framework, no linter, no formatter configured. "Done" means:
 
-1. **All nine CI variants build clean** — `-Wextra -Werror`, no new warnings
+1. **All 14 CI variants build clean** — `-Wextra -Werror`, no new warnings
    (see `mem:suggested_commands` for the env-var incantation):
    default, `PAJ_INT_MODE=0`, `PAJ_ENABLE_CALIBRATION=0`, `PAJ7620U2_DEBUG`,
    `PAJ_PROVIDE_EXTI_ISR=0`, `PAJ_GESTURE_ROTATE=1..3`, `PAJ_EXAMPLE_PS_MODE=1`,
    `PAJ_ENABLE_PS_MODE=0`, `PAJ_OWN_SYSTICK=0`.
    A variant that stops compiling when its feature is switched off is a bug.
 2. **Size ceilings hold** (footprint guard, default config): RAM ≤ 600 B,
-   Flash ≤ 13000 B. Baseline 508 B / 10804 B. Raise a ceiling only deliberately,
+   Flash ≤ 13000 B. Baseline 528 B / 10992 B. Raise a ceiling only deliberately,
    in the same commit, with a reason.
 3. **No float / no malloc / no unbounded stack frame** introduced; peak frame
    stays `calibrate_proximity()`'s `PAJ_CAL_SAMPLES` buffer (16 B).
@@ -23,7 +23,7 @@ No test framework, no linter, no formatter configured. "Done" means:
    "iii. Change to PS mode", "v. Change to Gesture mode", "vi./vii. Suspend/Resume").
 
 Commit style (matches `APDS-9960_CH32V003`): Conventional Commits, English
-subject, body only when non-obvious, e.g. `feat: v1.0.0 — …`,
+subject, body only when non-obvious, e.g. `feat: v1.1.0 — …`,
 `build: add VS Code tasks …`. Push to `main` of
 `tama18101971/PAJ7620U2_CH32V003`; CI must go green.
 
