@@ -41,7 +41,7 @@ API повторяет драйвер [APDS-9960_CH32V003](https://github.com/ta
 
 ```ini
 lib_deps =
-    https://github.com/tama18101971/PAJ7620U2_CH32V003.git#v1.1.0
+    https://github.com/tama18101971/PAJ7620U2_CH32V003.git#v1.1.1
 ```
 
 Библиотека тянет за собой `I2C-CH32V003` (пин `#v7.1.0`) — драйвер I2C1

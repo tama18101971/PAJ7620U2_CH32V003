@@ -54,7 +54,7 @@ No test framework configured. Manual testing via UART output (PD5, 115200 baud).
 | `src/paj_int_config.h` / `src/paj_int_config.c` | EXTI setup (INT → PC3) |
 | `examples/basic/main.c` | Non-blocking polling/interrupt example, TIM2 ms timebase, trace and proximity demo |
 | `platformio.ini` | Build config, library deps (`I2C-CH32V003`, pinned `#v7.1.0`), LTO on |
-| `library.json` | PlatformIO library manifest (v1.1.0, excludes `examples/`) |
+| `library.json` | PlatformIO library manifest (v1.1.1, excludes `examples/`) |
 | `INTEGRATION_RU.md` | APDS-9960 → PAJ7620U2 migration, incl. DriverMD6 |
 | `LICENSE` | MIT license |
 | `.clangd` | Removes the RISC-V target flags from the compile DB for native clang/clangd |

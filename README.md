@@ -40,7 +40,7 @@ Identical to the APDS-9960 driver — the board is reused as is:
 
 ```ini
 lib_deps =
-    https://github.com/tama18101971/PAJ7620U2_CH32V003.git#v1.1.0
+    https://github.com/tama18101971/PAJ7620U2_CH32V003.git#v1.1.1
 ```
 
 The library pulls in `I2C-CH32V003` (pinned `#v7.1.0`). The application must

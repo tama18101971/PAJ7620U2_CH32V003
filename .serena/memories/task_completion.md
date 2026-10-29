@@ -23,7 +23,7 @@ No test framework, no linter, no formatter configured. "Done" means:
    "iii. Change to PS mode", "v. Change to Gesture mode", "vi./vii. Suspend/Resume").
 
 Commit style (matches `APDS-9960_CH32V003`): Conventional Commits, English
-subject, body only when non-obvious, e.g. `feat: v1.1.0 — …`,
+subject, body only when non-obvious, e.g. `feat: v1.1.1 — …`,
 `build: add VS Code tasks …`. Push to `main` of
 `tama18101971/PAJ7620U2_CH32V003`; CI must go green.
 
