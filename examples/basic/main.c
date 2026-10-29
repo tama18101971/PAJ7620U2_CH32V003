@@ -36,6 +36,23 @@
 #define PAJ_EXAMPLE_TRACE      0
 #endif
 
+/* 1 = печатать причину последнего сброса МК (флаги RCC->RSTSCKR).
+ * Нужно для разбора «спонтанных перезагрузок»: POR — просадка питания
+ * (ИК-светодиод датчика даёт импульсы до 720…860 мА), PIN — внешний сброс
+ * (кнопка, WCH-Link, auto-reset USB-UART), SW — программный сброс/прошивка,
+ * WDG — сторожевой таймер. */
+#ifndef PAJ_EXAMPLE_RESET_INFO
+#define PAJ_EXAMPLE_RESET_INFO 1
+#endif
+
+/* 1 = диагностика питания: после инициализации датчик переводится в suspend
+ * (ИК-светодиод погашен, потребление ≈15 мкА), I2C больше не используется,
+ * прошивка печатает только heartbeat. Если циклические перезагрузки при этом
+ * прекращаются — причина в токе светодиода/питании датчика, а не в МК. */
+#ifndef PAJ_EXAMPLE_POWER_TEST
+#define PAJ_EXAMPLE_POWER_TEST 0
+#endif
+
 /* Обработчики прерываний (обязательны для CH32V003) */
 void NMI_Handler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 void HardFault_Handler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
@@ -64,6 +81,38 @@ static void timebase_init(void) {
     NVIC_Init(&nvic);
     TIM_Cmd(TIM2, ENABLE);
 }
+
+/* Причина последнего сброса МК по флагам RCC->RSTSCKR.
+ * Флаги накапливаются от сброса к сбросу, поэтому после печати они
+ * очищаются (RMVF) — иначе следующая загрузка снова показала бы POR.
+ * Разбор для «спонтанных перезагрузок»:
+ *   POR  — просадка питания; типовой источник — импульсы ИК-светодиода
+ *          PAJ7620U2 (720…860 мА), если VLED питается от той же цепи, что МК;
+ *   PIN  — внешний сброс по NRST: кнопка, WCH-Link, auto-reset USB-UART;
+ *   SW   — программный сброс (в т.ч. перепрошивка через WCH-Link);
+ *   IWDG/WWDG — сработал сторожевой таймер (в этом примере он не включается);
+ *   LPWR — сброс при выходе из режима пониженного потребления.
+ * Зависание в HardFault_Handler, наоборот, НЕ даёт перезагрузки: обработчик
+ * здесь бесконечный, поэтому печать баннера означает именно сброс. */
+#if PAJ_EXAMPLE_RESET_INFO
+static void print_reset_cause(void) {
+    printf("Reset:");
+    if (RCC_GetFlagStatus(RCC_FLAG_PINRST) != RESET)  printf(" PIN");
+    if (RCC_GetFlagStatus(RCC_FLAG_PORRST) != RESET)  printf(" POR");
+    if (RCC_GetFlagStatus(RCC_FLAG_SFTRST) != RESET)  printf(" SW");
+    if (RCC_GetFlagStatus(RCC_FLAG_IWDGRST) != RESET) printf(" IWDG");
+    if (RCC_GetFlagStatus(RCC_FLAG_WWDGRST) != RESET) printf(" WWDG");
+    if (RCC_GetFlagStatus(RCC_FLAG_LPWRRST) != RESET) printf(" LPWR");
+    printf("\r\n");
+    RCC_ClearFlag();
+    /* Самопроверка: RMVF должен снять флаги. Если POR остался, значит флаги
+     * «залипли» (или питание просажено прямо сейчас) и выводу выше доверять
+     * нельзя — это тоже важно знать. */
+    if (RCC_GetFlagStatus(RCC_FLAG_PORRST) != RESET) {
+        printf("  (RCC reset flags not cleared)\r\n");
+    }
+}
+#endif
 
 /* Вывод имени распознанного жеста в UART (общий код для polling/interrupt) */
 static void print_gesture(gesture_t g) {
@@ -191,6 +240,10 @@ int main(void) {
     timebase_init();
     USART_Printf_Init(115200);
     printf("PAJ7620U2 gesture driver init...\r\n");
+#if PAJ_EXAMPLE_RESET_INFO
+    /* Причина предыдущего сброса МК (флаги RCC) — до инициализации датчика. */
+    print_reset_cause();
+#endif
 
     uint8_t i2c_st = i2c_init(400000);
     if (i2c_st != I2C_OK) {
@@ -226,7 +279,29 @@ int main(void) {
     printf("Mode: POLLING\r\n");
 #endif
 
-    printf("PAJ7620U2 ready.\r\n");
+    /* Набор активных жестов задан конфигурацией сборки (platformio.ini:
+     * -DPAJ_GESTURE_MASK=0x0F -DPAJ_WAVE_MASK=0), поэтому печатаем фактическое
+     * состояние — оно же доступно и меняется в рантайме через
+     * paj_setGestureMask(). */
+    printf("PAJ7620U2 ready. Gesture mask 0x%02X, wave %s\r\n",
+           paj_getGestureMask(), paj_isWaveEnabled() ? "on" : "off");
+
+#if PAJ_EXAMPLE_POWER_TEST
+    /* Диагностика питания: гасим ИК-светодиод датчика (suspend, ≈15 мкА) и
+     * больше не обращаемся к I2C. Если циклические перезагрузки прекратились —
+     * виноват ток датчика/его питание; если продолжаются — МК, NRST или
+     * отладчик, и датчик тут ни при чём. */
+    if (!paj_shutdown()) {
+        printf("POWER TEST: sensor suspend failed (err=%d)\r\n", paj_getLastError());
+    } else {
+        printf("POWER TEST: sensor suspended, heartbeat only\r\n");
+    }
+    uint32_t beat = 0;
+    while (1) {
+        Delay_Ms(500);
+        printf("alive %u\r\n", (unsigned)beat++);
+    }
+#endif
 
     Delay_Ms(200);
 
@@ -248,6 +323,10 @@ int main(void) {
     while (1) {
         __WFI();
 #if PAJ_INT_MODE == 1
+        /* ISR-флаг — только подсказка «пора обслужить датчик»: paj_poll()
+         * сам читает флаги не чаще PAJ_POLL_INTERVAL_MS и тем самым отпускает
+         * active-low INT. Жест нужно забрать сразу: пока готовый результат не
+         * забран, драйвер не читает 0x43/0x44 и INT остаётся низким. */
         g_paj_int_flag = 0;
 #endif
         service_sensor();

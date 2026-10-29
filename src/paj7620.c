@@ -78,8 +78,22 @@ static uint8_t  g_cal_valid;
 
 /* Число чтений с антагонистической парой флагов: датчик не выбрал
  * направление (например, одновременно Up и Down). Диагностика качества
- * сигнала через paj_getAmbiguousCount(). */
+ * сигнала через paj_getAmbiguousCount(). Считаются только пары по
+ * РАЗРЕШЁННЫМ жестам: паразитная пара по отключённым (Forward|Backward при
+ * проходе ладони) не должна выглядеть как проблема сигнала. */
 static uint8_t  g_ambiguous;
+
+/* Активная маска жестов (биты GES_*) и признак разрешения жеста WAVE.
+ * Начальные значения — из конфигурации; меняются paj_setGestureMask().
+ * Маска применяется дважды: к прочитанным байтам 0x43/0x44 (программно) и к
+ * регистрам разрешения прерываний 0x41/0x42 (аппаратно). */
+static uint8_t  g_enabled_mask1 = PAJ_GESTURE_MASK;
+static uint8_t  g_enabled_wave  = (uint8_t)(PAJ_WAVE_MASK ? INT2_WAVE_FLAG : 0x00);
+
+/* Состояние масок прерываний в датчике: 1 — 0x41/0x42 записаны рабочими
+ * значениями, 0 — обнулены paj_disableInterrupt() или сборкой в polling.
+ * Нужно, чтобы paj_setGestureMask() не «воскрешал» выключенные прерывания. */
+static uint8_t  g_int_masks_on  = (uint8_t)(PAJ_INT_MODE == 1 ? 1 : 0);
 
 /* ============================================================================
  * ОБЕРТКИ НАД I2C (адрес датчика 0x73, два банка регистров)
@@ -229,13 +243,21 @@ static void poll_delay(void) {
  * её использует также paj_wakeup() (восстановление из suspend).
  * ============================================================================ */
 
-/* Начальная конфигурация (datasheet "i. Initial") — 47 записей.
+/* Начальная конфигурация (datasheet "i. Initial") — 45 записей.
+ * Из таблицы исключены:
+ *   - 0xEF (выбор банка) — его делает bank_sel();
+ *   - bank0 0x42 — маска прерываний: её пишет apply_int_masks() в конце
+ *     configure_sensor() из активной маски жестов;
+ *   - bank0 0x48 — порог Z-оси: его пишет apply_axis_thresholds() из
+ *     PAJ_ZDIR_THRESHOLD, иначе настройка перекрывалась бы таблицей;
+ *   - bank1 0x72 (Enable) — вынесена в enable_sensor(), её использует
+ *     paj_wakeup().
  * static const uint8_t[][3]: только .rodata/.text во Flash, без RAM-копии. */
 static const uint8_t g_init_seq[][3] = {
     /* банк 0: параметры gesture engine, AE и светового окружения */
     { PAJ_B0, 0x37, 0x07 }, { PAJ_B0, 0x38, 0x17 }, { PAJ_B0, 0x39, 0x06 },
-    { PAJ_B0, 0x42, 0x01 }, { PAJ_B0, 0x46, 0x2D }, { PAJ_B0, 0x47, 0x0F },
-    { PAJ_B0, 0x48, 0x3C }, { PAJ_B0, 0x49, 0x00 }, { PAJ_B0, 0x4A, 0x1E },
+    { PAJ_B0, 0x46, 0x2D }, { PAJ_B0, 0x47, 0x0F },
+    { PAJ_B0, 0x49, 0x00 }, { PAJ_B0, 0x4A, 0x1E },
     { PAJ_B0, 0x4C, 0x20 }, { PAJ_B0, 0x51, 0x10 }, { PAJ_B0, 0x5E, 0x10 },
     { PAJ_B0, 0x60, 0x27 }, { PAJ_B0, 0x80, 0x42 }, { PAJ_B0, 0x81, 0x44 },
     { PAJ_B0, 0x82, 0x04 }, { PAJ_B0, 0x8B, 0x01 }, { PAJ_B0, 0x90, 0x06 },
@@ -266,11 +288,12 @@ static const uint8_t g_ps_seq[][3] = {
     { PAJ_B1, 0x6E, 0xC3 }, { PAJ_B1, 0x74, 0x05 },
 };
 
-/* Возврат в режим жестов (datasheet "v. Change to Gesture mode") — 24 записи.
- * Последние две (маски прерываний) не включены: их значения задаются
- * конфигурацией и меняются paj_enableInterrupt()/paj_disableInterrupt(). */
+/* Возврат в режим жестов (datasheet "v. Change to Gesture mode") — 23 записи.
+ * Исключены: 0x48 (порог Z пишет apply_axis_thresholds(), вызов в
+ * paj_setGestureMode()) и последние две записи масок прерываний — их значения
+ * задаются конфигурацией и меняются paj_enableInterrupt()/paj_setGestureMask(). */
 static const uint8_t g_gesture_seq[][3] = {
-    { PAJ_B0, 0x41, 0x00 }, { PAJ_B0, 0x42, 0x00 }, { PAJ_B0, 0x48, 0x3C },
+    { PAJ_B0, 0x41, 0x00 }, { PAJ_B0, 0x42, 0x00 },
     { PAJ_B0, 0x49, 0x00 }, { PAJ_B0, 0x51, 0x10 }, { PAJ_B0, 0x83, 0x20 },
     { PAJ_B0, 0x9F, 0xF9 },
     { PAJ_B1, 0x01, 0x1E }, { PAJ_B1, 0x02, 0x0F }, { PAJ_B1, 0x03, 0x10 },
@@ -367,29 +390,43 @@ static bool apply_thresholds(void) {
     return wr(PAJ_B0, REG_PS_TH_HIGH, hi) && wr(PAJ_B0, REG_PS_TH_LOW, lo);
 }
 
-/* Порогов X/Y нет в официальной initial-таблице, поэтому после сброса они
- * остаются заводскими. Явная запись делает их воспроизводимыми и позволяет
- * настраивать чувствительность боковых жестов. */
+/* Порогов X/Y нет в официальной initial-таблице, а Z (0x48) в ней жёстко
+ * зафиксирован, поэтому все три пишутся явно: это делает их воспроизводимыми
+ * и позволяет настраивать чувствительность боковых жестов и порог Z-оси
+ * независимо от режима датчика (вызывается после каждой таблицы). */
 static bool apply_axis_thresholds(void) {
     return wr(PAJ_B0, REG_GEST_TH_X, (uint8_t)PAJ_XDIR_THRESHOLD) &&
-           wr(PAJ_B0, REG_GEST_TH_Y, (uint8_t)PAJ_YDIR_THRESHOLD);
+           wr(PAJ_B0, REG_GEST_TH_Y, (uint8_t)PAJ_YDIR_THRESHOLD) &&
+           wr(PAJ_B0, REG_GEST_TH_Z, (uint8_t)PAJ_ZDIR_THRESHOLD);
 }
 
-/* Запись масок прерываний (REG_INT1_EN / REG_INT2_EN, банк 0). */
+/* Запись масок разрешения прерываний (REG_INT1_EN / REG_INT2_EN, банк 0).
+ * Эти регистры управляют ТОЛЬКО выводом INT: флаги в 0x43/0x44 чип
+ * выставляет всегда, поэтому программная маска в read_gesture_flags()
+ * обязательна. */
 static bool write_int_masks(uint8_t m1, uint8_t m2) {
     return wr(PAJ_B0, REG_INT1_EN, m1) && wr(PAJ_B0, REG_INT2_EN, m2);
 }
 
-#define PAJ_INT2_MASK_ON  ((uint8_t)((PAJ_WAVE_MASK ? INT2_WAVE_MASK : 0x00) | \
-                                     (PAJ_PS_MASK   ? INT2_PS_MASK   : 0x00)))
+/* Маска REG_INT2_EN: wave включается в рантайме, PS — только конфигурацией. */
+static uint8_t int2_mask_on(void) {
+    return (uint8_t)(g_enabled_wave | (uint8_t)(PAJ_PS_MASK ? INT2_PS_MASK : 0x00));
+}
 
 /* Маски прерываний, применяемые при инициализации датчика. */
 static bool apply_int_masks(void) {
 #if PAJ_INT_MODE == 1
-    return write_int_masks(PAJ_GESTURE_MASK, PAJ_INT2_MASK_ON);
+    if (!write_int_masks(g_enabled_mask1, int2_mask_on())) {
+        return false;
+    }
+    g_int_masks_on = 1;
 #else
-    return write_int_masks(0x00, 0x00);
+    if (!write_int_masks(0x00, 0x00)) {
+        return false;
+    }
+    g_int_masks_on = 0;
 #endif
+    return true;
 }
 
 /* Включение датчика (bank1 0x72 = 0x01) с проверкой чтением обратно. */
@@ -513,20 +550,29 @@ static void recover_sensor(void) {
  * Если датчик сообщил составной набор, Z-жест важнее бокового: это устраняет
  * выдачу Up/Down/Left/Right вместо одновременно распознанного push/pull.
  * Датчик не сообщает порядок установки битов, поэтому это явная политика
- * драйвера, а не восстановленная временная последовательность. */
-/* Обе части антагонистической пары одновременно означают, что датчик не
- * выбрал направление (на аппаратуре наблюдалось 0x43 = 0x3F). */
-static bool flags_contradictory(uint8_t flag1) {
-    return ((flag1 & GES_PAIR_UP_DOWN)    == GES_PAIR_UP_DOWN)    ||
-           ((flag1 & GES_PAIR_LEFT_RIGHT) == GES_PAIR_LEFT_RIGHT) ||
-           ((flag1 & GES_PAIR_FWD_BACK)   == GES_PAIR_FWD_BACK)   ||
-           ((flag1 & GES_PAIR_ROTATE)     == GES_PAIR_ROTATE);
+ * драйвера, а не восстановленная временная последовательность.
+ *
+ * При PAJ_Z_OVERRIDES_XY=0 (режим управления ладонью) политика отличается:
+ * боковой бит в том же чтении, что и Z-бит, — типичный след широкой ладони
+ * (скачок размера/яркости объекта), поэтому Z-биты отбрасываются, а
+ * направление сохраняется. */
+
+/* Маска пар, по которым датчик не выбрал направление (на аппаратуре
+ * наблюдалось 0x43 = 0x3F). Пары чистятся ПООТДЕЛЬНОСТИ: вызывающий снимает
+ * только противоречивые биты, остальные остаются пригодными к декодированию. */
+static uint8_t contradictory_mask(uint8_t flag1) {
+    uint8_t bad = 0;
+    if ((flag1 & GES_PAIR_UP_DOWN)    == GES_PAIR_UP_DOWN)    bad |= GES_PAIR_UP_DOWN;
+    if ((flag1 & GES_PAIR_LEFT_RIGHT) == GES_PAIR_LEFT_RIGHT) bad |= GES_PAIR_LEFT_RIGHT;
+    if ((flag1 & GES_PAIR_FWD_BACK)   == GES_PAIR_FWD_BACK)   bad |= GES_PAIR_FWD_BACK;
+    if ((flag1 & GES_PAIR_ROTATE)     == GES_PAIR_ROTATE)     bad |= GES_PAIR_ROTATE;
+    return bad;
 }
 
 static gesture_t decode_gesture(uint8_t flag1, uint8_t flag2) {
-#if PAJ_REJECT_AMBIGUOUS
-    if (flags_contradictory(flag1)) {
-        return GESTURE_NONE;
+#if !PAJ_Z_OVERRIDES_XY
+    if ((flag1 & GES_MASK_XY) != 0 && (flag1 & GES_MASK_Z) != 0) {
+        flag1 = (uint8_t)(flag1 & (uint8_t)~GES_MASK_Z);
     }
 #endif
 
@@ -546,9 +592,24 @@ static gesture_t decode_gesture(uint8_t flag1, uint8_t flag2) {
     return g;
 }
 
-/* Burst-read 0x43..0x44 за одну I2C-транзакцию (datasheet, Burst Read).
- * В Lite-варианте I2C-библиотеки остаются два чтения; f1 сохраняется даже
- * при ошибке f2, потому что успешное чтение 0x43 уже очистило его флаги. */
+/* Чтение флагов жестов с программной фильтрацией по активной маске.
+ *
+ * 0x43/0x44 сбрасываются при чтении, поэтому это единственный путь их
+ * чтения (см. poll_gesture()). Два важных шага:
+ *   1) маска: REG_INT1_EN/REG_INT2_EN управляют только выводом INT, а чип
+ *      выставляет ВСЕ флаги. Без маски отключённый жест продолжал бы
+ *      перебивать разрешённый — например, паразитная пара Forward|Backward
+ *      от широкой ладони отбрасывала валидный Left;
+ *   2) противоречия проверяются ТОЛЬКО после маски и чистятся
+ *      поотдельности, чтобы отключённые жесты не влияли ни на счётчик
+ *      paj_getAmbiguousCount(), ни на декодирование.
+ *
+ * Если WAVE запрещён и PS-флаг не нужен (PAJ_PS_MASK=0), второй байт 0x44 не
+ * читается: одна транзакция вместо burst-чтения двух регистров. Флаги 0x44
+ * при выключенной маске 0x42 не удерживают вывод INT.
+ *
+ * В Lite-варианте I2C-библиотеки два чтения; f1 сохраняется даже при ошибке
+ * f2, потому что успешное чтение 0x43 уже очистило его флаги. */
 static bool read_gesture_flags(uint8_t *f1, uint8_t *f2) {
     *f1 = 0;
     *f2 = 0;
@@ -556,27 +617,50 @@ static bool read_gesture_flags(uint8_t *f1, uint8_t *f2) {
         return false;
     }
 
+    /* Второй байт нужен только для wave/PS. */
+#if PAJ_PS_MASK
+    const uint8_t need2 = 1;
+#else
+    const uint8_t need2 = (uint8_t)(g_enabled_wave != 0);
+#endif
+
     uint8_t st;
+    uint8_t bad;
 #ifndef I2C_DISABLE_BUFFER_API
-    uint8_t flags[2] = {0, 0};
-    st = i2c_read_buffer(PAJ7620_I2C_ADDR, REG_INT_FLAG1, flags, 2);
-    *f1 = flags[0];
-    *f2 = flags[1];
+    if (need2) {
+        uint8_t flags[2] = {0, 0};
+        st = i2c_read_buffer(PAJ7620_I2C_ADDR, REG_INT_FLAG1, flags, 2);
+        *f1 = flags[0];
+        *f2 = flags[1];
+    } else {
+        st = i2c_read_register(PAJ7620_I2C_ADDR, REG_INT_FLAG1, f1);
+    }
 #else
     st = i2c_read_register(PAJ7620_I2C_ADDR, REG_INT_FLAG1, f1);
-    if (st == I2C_OK) {
+    if (st == I2C_OK && need2) {
         st = i2c_read_register(PAJ7620_I2C_ADDR, REG_INT_FLAG2, f2);
     }
 #endif
-    if (flags_contradictory(*f1)) {
+
+    /* Отключённые жесты вырезаются до любых проверок. */
+    *f1 = (uint8_t)(*f1 & g_enabled_mask1);
+    *f2 = (uint8_t)(*f2 & g_enabled_wave);
+
+    bad = contradictory_mask(*f1);
+    if (bad != 0) {
         g_ambiguous++;
+#if PAJ_REJECT_AMBIGUOUS
+        *f1 = (uint8_t)(*f1 & (uint8_t)~bad);
+#endif
     }
+
     if (st != I2C_OK) {
         note_i2c(st);
         return false;
     }
 
-    /* Оба байта прочитаны — цепочка сбоев I2C прервана. */
+    /* Чтение успешно — цепочка сбоев I2C прервана (второй байт мог быть не
+     * нужен: при выключенном WAVE читается только 0x43). */
     g_fail_streak = 0;
     return true;
 }
@@ -601,7 +685,13 @@ static void publish_gesture(gesture_t g, uint32_t now_ms) {
 }
 
 /* Entry-фильтр и cooldown. Вызов с GESTURE_NONE нужен для подтверждения
- * ранее сохранённого бокового жеста по истечении временного окна. */
+ * ранее сохранённого бокового жеста.
+ *
+ * Политика Z-оси зависит от PAJ_Z_OVERRIDES_XY:
+ *   0 — ладонь: Z-флаг не отменяет начатый боковой жест, а если датчик
+ *       перестал выдавать боковой флаг, кандидат подтверждается сразу;
+ *   1 — палец: одиночный Forward/Backward выдаётся немедленно и отменяет
+ *       ожидающий боковой результат (прежнее поведение). */
 static void filter_gesture(gesture_t g, uint32_t now_ms) {
     if (!time_reached(now_ms, g_cooldown_until_ms)) {
         g_pending_gesture = GESTURE_NONE;
@@ -609,7 +699,16 @@ static void filter_gesture(gesture_t g, uint32_t now_ms) {
     }
 
     if (g == GESTURE_FORWARD || g == GESTURE_BACKWARD) {
+#if PAJ_Z_OVERRIDES_XY
         publish_gesture(g, now_ms);   /* Z-жест отменяет бокового кандидата */
+#else
+        /* Пока ждёт подтверждения боковой жест, одиночный Z-флаг почти всегда
+         * означает засвет от широкой ладони (её середина прошла над датчиком
+         * или край вышел из зоны). Кандидат сохраняется, событие теряется. */
+        if (g_pending_gesture == GESTURE_NONE) {
+            publish_gesture(g, now_ms);
+        }
+#endif
         return;
     }
 
@@ -633,10 +732,21 @@ static void filter_gesture(gesture_t g, uint32_t now_ms) {
     }
 
 #if PAJ_GESTURE_CONFIRM_MS != 0
+#  if PAJ_Z_OVERRIDES_XY
+    /* Палец: подтверждение только по истечении окна. */
     if (g_pending_gesture != GESTURE_NONE &&
         time_reached(now_ms, g_pending_deadline_ms)) {
         publish_gesture((gesture_t)g_pending_gesture, now_ms);
     }
+#  else
+    /* Ладонь: флаг направления прочитан, датчик больше его не выдаёт —
+     * жест закончился. Подтверждаем на следующем опросе (через
+     * PAJ_POLL_INTERVAL_MS), не дожидаясь полного окна: паразитный Z-флаг с
+     * заднего края ладони придёт позже и попадёт уже в cooldown. */
+    if (g_pending_gesture != GESTURE_NONE) {
+        publish_gesture((gesture_t)g_pending_gesture, now_ms);
+    }
+#  endif
 #endif
 }
 
@@ -1046,6 +1156,51 @@ uint8_t paj_getAmbiguousCount(void) {
     return g_ambiguous;
 }
 
+/* ============================================================================
+ * МАСКА АКТИВНЫХ ЖЕСТОВ (рантайм-аналог PAJ_GESTURE_MASK / PAJ_WAVE_MASK)
+ * ============================================================================ */
+
+bool paj_setGestureMask(uint8_t mask1, bool enable_wave) {
+    bool unchanged = (mask1 == g_enabled_mask1) &&
+                     (enable_wave == (g_enabled_wave != 0));
+
+    /* Повторная установка той же маски не должна ни сбрасывать фильтр, ни
+     * занимать шину: приложение может вызывать функцию в цикле настройки. */
+    if (unchanged) {
+        g_last_error = PAJ_ERR_NONE;
+        return true;
+    }
+
+    g_enabled_mask1 = mask1;
+    g_enabled_wave  = enable_wave ? (uint8_t)INT2_WAVE_FLAG : (uint8_t)0x00;
+
+    /* Смена маски обесценивает и недособранный кандидат, и готовый слот:
+     * жест в нём мог быть получен по теперь отключённому флагу, а отдавать
+     * запрещённый жест нельзя. */
+    gesture_reset();
+
+    /* Прерывания выключены (polling-сборка или paj_disableInterrupt()) —
+     * пишем маску только в RAM, чтобы не включить вывод INT обратно. */
+    if (!g_int_masks_on) {
+        g_last_error = PAJ_ERR_NONE;
+        return true;
+    }
+    if (!apply_int_masks()) {
+        g_last_error = PAJ_ERR_I2C;
+        return false;
+    }
+    g_last_error = PAJ_ERR_NONE;
+    return true;
+}
+
+uint8_t paj_getGestureMask(void) {
+    return g_enabled_mask1;
+}
+
+bool paj_isWaveEnabled(void) {
+    return g_enabled_wave != 0;
+}
+
 bool paj_recalibrate(void) {
 #if PAJ_ENABLE_CALIBRATION
     if (!calibrate_proximity()) {
@@ -1072,15 +1227,19 @@ bool paj_recalibrate(void) {
  * ============================================================================ */
 
 void paj_enableInterrupt(void) {
-    if (!write_int_masks(PAJ_GESTURE_MASK, PAJ_INT2_MASK_ON)) {
+    if (!write_int_masks(g_enabled_mask1, int2_mask_on())) {
         g_last_error = PAJ_ERR_I2C;
+        return;
     }
+    g_int_masks_on = 1;
 }
 
 void paj_disableInterrupt(void) {
     if (!write_int_masks(0x00, 0x00)) {
         g_last_error = PAJ_ERR_I2C;
+        return;
     }
+    g_int_masks_on = 0;
 }
 
 void paj_clearInterrupt(void) {
@@ -1123,6 +1282,13 @@ bool paj_setGestureMode(void) {
     gesture_reset();
 
     if (!write_seq(g_gesture_seq, ARRAY_LEN(g_gesture_seq))) {
+        g_last_error = PAJ_ERR_I2C;
+        return false;
+    }
+    /* Пороги X/Y/Z в таблицу режима не входят: PS-режим оставляет в них
+     * свои значения (0x48 = 0x20), поэтому чувствительность восстанавливается
+     * явно, иначе после возврата из proximity жесты работают иначе. */
+    if (!apply_axis_thresholds()) {
         g_last_error = PAJ_ERR_I2C;
         return false;
     }

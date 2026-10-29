@@ -2,14 +2,20 @@
 
 No test framework, no linter, no formatter configured. "Done" means:
 
-1. **All 14 CI variants build clean** — `-Wextra -Werror`, no new warnings
+1. **All 20 CI variants build clean** — `-Wextra -Werror`, no new warnings
    (see `mem:suggested_commands` for the env-var incantation):
    default, `PAJ_INT_MODE=0`, `PAJ_ENABLE_CALIBRATION=0`, `PAJ7620U2_DEBUG`,
    `PAJ_PROVIDE_EXTI_ISR=0`, `PAJ_GESTURE_ROTATE=1..3`, `PAJ_EXAMPLE_PS_MODE=1`,
-   `PAJ_ENABLE_PS_MODE=0`, `PAJ_OWN_SYSTICK=0`.
+   `PAJ_ENABLE_PS_MODE=0`, `PAJ_OWN_SYSTICK=0`, `PAJ_GESTURE_MASK` override
+   (`all-gestures-mask`, needs `PLATFORMIO_BUILD_UNFLAGS`), `PAJ_Z_OVERRIDES_XY=1`,
+   `PAJ_GESTURE_CONFIRM_MS=0`, `PAJ_PS_MASK=1`, `PAJ_EXAMPLE_RESET_INFO=0`,
+   `PAJ_EXAMPLE_POWER_TEST=1`.
    A variant that stops compiling when its feature is switched off is a bug.
+   `platformio.ini` pins `-DPAJ_GESTURE_MASK=0x0F -DPAJ_WAVE_MASK=0`; repeating
+   the same `-D` from `PLATFORMIO_BUILD_FLAGS` is a gcc `redefined` warning and
+   therefore a hard failure under `-Werror`.
 2. **Size ceilings hold** (footprint guard, default config): RAM ≤ 600 B,
-   Flash ≤ 13000 B. Baseline 528 B / 10992 B. Raise a ceiling only deliberately,
+   Flash ≤ 13000 B. Baseline 528 B / 11108 B. Raise a ceiling only deliberately,
    in the same commit, with a reason.
 3. **No float / no malloc / no unbounded stack frame** introduced; peak frame
    stays `calibrate_proximity()`'s `PAJ_CAL_SAMPLES` buffer (16 B).

@@ -32,11 +32,16 @@ bit6 CW, bit7 CCW`; wave is `0x44 bit0`.
 
 Decode is not simply "lowest set bit". The sensor sets bits independently, so
 a weak signal yields several at once — `0x43 = 0x3F` (up+down+left+right+
-forward+backward) was measured on the bench. `flags_contradictory()` rejects
-any read containing both halves of an antipodal pair (`GES_PAIR_*` in
-`paj7620_regs.h`) while `PAJ_REJECT_AMBIGUOUS=1` (default); events are counted
-in `g_ambiguous` / `paj_getAmbiguousCount()`. `PAJ_REJECT_AMBIGUOUS=0`
-restores the lowest-set-bit behaviour. Wave loses to any directional flag.
+forward+backward) was measured on the bench. `contradictory_mask()` finds every
+antipodal pair (`GES_PAIR_*` in `paj7620_regs.h`) that is fully set and, with
+`PAJ_REJECT_AMBIGUOUS=1` (default), clears only those bits — the rest of the
+read stays decodable — while the event is counted in `g_ambiguous` /
+`paj_getAmbiguousCount()`. `PAJ_REJECT_AMBIGUOUS=0` keeps the bits and relies on
+the decode priority. Wave loses to any directional flag.
+
+The check runs on the **masked** flags (`read_gesture_flags()` ANDs them with
+`g_enabled_mask1`/`g_enabled_wave` first), so a pair made of disabled gestures
+neither increments the counter nor discards an enabled gesture.
 
 ## Gesture thresholds
 
@@ -44,9 +49,15 @@ Bank 0 `0x93 R_XDirectionThd[4:0]` (left/right) and `0x94 R_YDirectionThd[4:0]`
 (up/down) are in the datasheet "Register Map" but **absent from the "i. Initial"
 array**, so they stay at the power-on value and cannot be tuned through the
 table. Measured power-on: `0x93=0x0D`, `0x94=0x0A`. They are now
-`PAJ_XDIR_THRESHOLD` / `PAJ_YDIR_THRESHOLD` (range 0..0x1F) written by
-`apply_axis_thresholds()`, so the left/right and up/down sensitivity is the
-one lever over these four gestures.
+`PAJ_XDIR_THRESHOLD` / `PAJ_YDIR_THRESHOLD` (range 0..0x1F).
+
+Bank 0 `0x48 R_ZDirectionThd` (push/pull) *is* in the init array, but as a fixed
+`0x3C` (PS mode writes `0x20`), so it was untunable as well. It is now
+`PAJ_ZDIR_THRESHOLD` (default `0x3C`; raise to `0x48..0x55` when a wide palm
+triggers false Forward/Backward). The `0x48` entry was removed from
+`g_init_seq`/`g_gesture_seq`, and `apply_axis_thresholds()` writes X/Y/Z after
+every table — `paj_setGestureMode()` calls it explicitly, otherwise the PS-mode
+value would survive the mode switch.
 
 Every other gesture-engine register *is* in the init array: `0x90`
 no-motion count, `0x95` Z threshold, `0x96`/`0x97` forward/backward, `0x9A`
@@ -56,12 +67,14 @@ wave count + angle, `0xD0` abort count + XY ratio.
 
 ## Tables
 
-`g_init_seq` (47 entries) = datasheet "i. Initial" minus the 0xEF writes and
-minus `{bank1, 0x72, 0x01}` (Enable is written by `enable_sensor()` so
-`paj_wakeup()` can reuse it). `g_ps_seq` (26) = "iii. Change to PS mode",
-`g_gesture_seq` (24) = "v. Change to Gesture mode" (its trailing mask writes
-are replaced by config-driven masks). Order is datasheet order — do not
-"optimize" it.
+`g_init_seq` (45 entries) = datasheet "i. Initial" minus the 0xEF writes,
+minus `{bank0, 0x42, 0x01}` (mask is written by `apply_int_masks()` from the
+active gesture mask), minus `{bank0, 0x48, 0x3C}` (see thresholds) and minus
+`{bank1, 0x72, 0x01}` (Enable is written by `enable_sensor()` so `paj_wakeup()`
+can reuse it). `g_ps_seq` (26) = "iii. Change to PS mode", `g_gesture_seq` (23) =
+"v. Change to Gesture mode" (its trailing mask writes are replaced by
+config-driven masks, its `0x48` write by `apply_axis_thresholds()`). Order is
+datasheet order — do not "optimize" it.
 
 ## Two register maps in the wild — this driver follows the official one
 

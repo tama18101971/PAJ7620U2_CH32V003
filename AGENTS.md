@@ -19,14 +19,22 @@ pio run -t upload  # flash via WCH-Link
 pio run -t size    # size report
 ```
 
-CI (`.github/workflows/ci.yml`) builds 14 config variants with
+CI (`.github/workflows/ci.yml`) builds 20 config variants with
 `-Wextra -Werror` on project sources (`PLATFORMIO_BUILD_SRC_FLAGS`, so SDK
 and library sources are not affected) plus a size-ceiling guard
 (RAM ≤ 600 B, flash ≤ 13000 B for the default build).
 
 Variants: default, polling, no-calibration, debug-output, external-exti-isr,
 rotated-module, proximity-demo, gesture-trace, no-ps-mode, no-own-systick,
-reinit-threshold-1, calibrate-on-init, axis-thresholds-tuned, accept-ambiguous.
+reinit-threshold-1, calibrate-on-init, axis-thresholds-tuned, accept-ambiguous,
+all-gestures-mask, z-axis-priority, no-confirm-window, ps-mask, no-reset-info,
+power-test.
+
+The example build pins the gesture mask to 4 directions in `platformio.ini`
+(`-DPAJ_GESTURE_MASK=0x0F -DPAJ_WAVE_MASK=0`); the `all-gestures-mask` variant
+cancels those with `PLATFORMIO_BUILD_UNFLAGS` before setting its own values —
+a second `-D` of the same macro is a gcc `redefined` warning and `-Werror`
+turns it into a build failure.
 
 No test framework configured. Manual testing via UART output (PD5, 115200 baud).
 
@@ -52,9 +60,9 @@ No test framework configured. Manual testing via UART output (PD5, 115200 baud).
 | `src/paj7620.c` | Driver implementation (register tables, wake-up, gestures, calibration) |
 | `src/paj7620_regs.h` | PAJ7620U2 register map (bank 0/1, flag bits) |
 | `src/paj_int_config.h` / `src/paj_int_config.c` | EXTI setup (INT → PC3) |
-| `examples/basic/main.c` | Non-blocking polling/interrupt example, TIM2 ms timebase, trace and proximity demo |
-| `platformio.ini` | Build config, library deps (`I2C-CH32V003`, pinned `#v7.1.0`), LTO on |
-| `library.json` | PlatformIO library manifest (v1.1.1, excludes `examples/`) |
+| `examples/basic/main.c` | Non-blocking polling/interrupt example, TIM2 ms timebase, trace and proximity demo (prints the effective gesture mask) |
+| `platformio.ini` | Build config, project gesture mask (4 directions), library deps (`I2C-CH32V003`, pinned `#v7.1.0`), LTO on, `default_envs`, extra `power_test` env (sensor suspended + heartbeat) |
+| `library.json` | PlatformIO library manifest (v1.2.0, excludes `examples/`) |
 | `INTEGRATION_RU.md` | APDS-9960 → PAJ7620U2 migration, incl. DriverMD6 |
 | `LICENSE` | MIT license |
 | `.clangd` | Removes the RISC-V target flags from the compile DB for native clang/clangd |
@@ -96,17 +104,35 @@ C projects need an LSP backend; without one the symbol tools
   no pixel data, and `APDS_FIFO_*` / `APDS_GESTURE_SENSITIVITY` analogues do
   not exist.
 - **Reading 0x43/0x44 clears the flags.** `read_gesture_flags()` performs a
-  burst read where the I2C library supports it and falls back to two reads in
-  `I2C_LITE` mode. The gesture is cached in `g_gesture`/`g_has_gesture`; an
-  unread result is never overwritten. Any new code that reads the flag
-  registers must go through this path or it will destroy a pending gesture.
+  burst read of both registers where the I2C library supports it and falls back
+  to two reads in `I2C_LITE` mode; when wave is disabled (`g_enabled_wave == 0`)
+  and `PAJ_PS_MASK == 0` it reads only 0x43 — one transaction less per poll.
+  The gesture is cached in `g_gesture`/`g_has_gesture`; an unread result is
+  never overwritten. Any new code that reads the flag registers must go through
+  this path or it will destroy a pending gesture.
+- **The gesture mask is applied in software, not just to INT.** 0x41/0x42 only
+  gate the INT pin; the chip keeps setting every bit in 0x43/0x44.
+  `read_gesture_flags()` therefore ANDs the read bytes with
+  `g_enabled_mask1`/`g_enabled_wave` (from `PAJ_GESTURE_MASK`/`PAJ_WAVE_MASK`,
+  changed at runtime by `paj_setGestureMask()`) **before** decoding and before
+  the contradiction check. Without that, a disabled gesture (Forward/Backward,
+  CW/CCW) still won `decode_gesture()` and could discard an enabled direction.
+  `g_int_masks_on` remembers whether 0x41/0x42 currently hold real masks, so
+  changing the mask never re-enables interrupts that `paj_disableInterrupt()`
+  (or a polling build) turned off.
 - **`paj_poll(now_ms)` is the recommended non-blocking path.** It reads flags
   at most every `PAJ_POLL_INTERVAL_MS` (5 ms), holds directional gestures for
-  `PAJ_GESTURE_CONFIRM_MS` (40 ms), lets Forward/Backward cancel a pending
-  direction, and applies `PAJ_GESTURE_COOLDOWN_MS` (150 ms). `paj_takeGesture()`
-  consumes the one ready slot. `paj_available()`/`paj_readGesture()` remain as
-  legacy immediate/blocking APIs. Every EXTI design must still call
-  `paj_poll()` regularly so a directional window completes without a new edge.
+  `PAJ_GESTURE_CONFIRM_MS` (20 ms), and applies `PAJ_GESTURE_COOLDOWN_MS`
+  (230 ms — a wide palm crosses the sensor slower than a finger). With
+  `PAJ_Z_OVERRIDES_XY=0` (default, palm control) a Forward/Backward flag does
+  not cancel a pending direction and the pending direction is published as soon
+  as the sensor stops reporting it; with `=1` (finger) Z is emitted immediately
+  and cancels a pending direction. `paj_takeGesture()` consumes the one ready
+  slot. `paj_available()`/`paj_readGesture()` remain as legacy
+  immediate/blocking APIs. Every EXTI design must still call `paj_poll()`
+  regularly so a directional window completes without a new edge, and must take
+  the gesture promptly: while a ready gesture is unread no flag read happens,
+  so the active-low INT stays asserted.
 - **Two register banks** (selected by 0xEF). `bank_sel()` caches the current
   bank in `g_bank` to avoid an extra I2C transaction per access;
   `PAJ_BANK_UNKNOWN` forces re-selection (set after wake-up/suspend).
@@ -122,19 +148,26 @@ C projects need an LSP backend; without one the symbol tools
   up/down) are documented in the "Register Map" but absent from the
   "i. Initial" write array, so they keep their power-on value and were
   untunable. Measured on the bench module: `0x93=0x0D`, `0x94=0x0A` — those are
-  now `PAJ_XDIR_THRESHOLD` / `PAJ_YDIR_THRESHOLD` and are written explicitly by
-  `apply_axis_thresholds()` (range 0..0x1F, validated by `#error`). Every other
-  gesture threshold (`0x90`, `0x95`..`0x97`, `0x9A`, `0x9C`, `0x9F`, `0xCF`,
-  `0xD0`) is in the init array.
-- **Ambiguous flag reads are rejected.** The sensor sets flag bits
-  independently, so a weak signal can make one gesture produce several bits —
-  `0x43 = 0x3F` (up+down+left+right+forward+backward) was observed on the
-  bench. `flags_contradictory()` detects that (both halves of an antipodal
-  pair are set) and, with `PAJ_REJECT_AMBIGUOUS=1` (default), such reads
-  return `GESTURE_NONE` instead of the lowest set bit, which used to be a
-  confidently wrong gesture. Counted in `g_ambiguous`, read via
-  `paj_getAmbiguousCount()`. Rising counts point at hardware/signal quality
-  (IR LED rail, hand distance, gesture speed), not at the driver.
+  now `PAJ_XDIR_THRESHOLD` / `PAJ_YDIR_THRESHOLD`. Bank 0 `0x48`
+  (`R_ZDirectionThd`, push/pull) *is* in the init array as a fixed `0x3C`, so it
+  was equally untunable; it is now `PAJ_ZDIR_THRESHOLD` (raise to `0x48..0x55`
+  when a wide palm produces false Forward/Backward). All three are written by
+  `apply_axis_thresholds()` (X/Y range 0..0x1F, validated by `#error`) after
+  every table, and the 0x48 entries are stripped from `g_init_seq` /
+  `g_gesture_seq` so the config value always wins — including after
+  `paj_setGestureMode()`, which would otherwise restore the PS-mode `0x20`.
+  Every other gesture threshold (`0x90`, `0x95`..`0x97`, `0x9A`, `0x9C`, `0x9F`,
+  `0xCF`, `0xD0`) is in the init array.
+- **Ambiguous flags are cleared per pair, not per read.** The sensor sets flag
+  bits independently, so a weak signal can make one gesture produce several
+  bits — `0x43 = 0x3F` (up+down+left+right+forward+backward) was observed on
+  the bench. `contradictory_mask()` finds every antipodal pair that is fully
+  set and, with `PAJ_REJECT_AMBIGUOUS=1` (default), only those bits are
+  cleared: `Left|Forward|Backward` now decodes as `Left` instead of being
+  discarded entirely, and the check runs on the already-masked flags so a
+  disabled pair cannot spoil an enabled gesture. Counted in `g_ambiguous`,
+  read via `paj_getAmbiguousCount()`. Rising counts point at hardware/signal
+  quality (IR LED rail, hand distance, gesture speed), not at the driver.
 - **Power states differ from the APDS driver.** `paj_shutdown()` performs a
   real suspend (Enable = 0 + write 0x01 to `0x03`), so `paj_wakeup()` must run
   the I2C wake-up command. `paj_sleep()` only clears Enable and keeps the
@@ -203,12 +236,32 @@ C projects need an LSP backend; without one the symbol tools
   `GPIO_EXTILineConfig()`; otherwise the EXTI mapping is silently ignored.
 - The EXTI ISR in `paj_int_config.c` is intentionally **strong**: the
   NoneOS-SDK weak fallback handler is an infinite loop.
-- Reference sizes (examples/basic, LTO on): RAM 528 B, Flash 10992 B. The
-  driver itself is about 2 KB of flash and ~32 bytes of static RAM.
+- Reference sizes (examples/basic, LTO on): RAM 528 B, Flash 11108 B. The
+  driver itself is about 2 KB of flash and ~35 bytes of static RAM.
+- The example is built with `-DPAJ_GESTURE_MASK=0x0F -DPAJ_WAVE_MASK=0`
+  (4 directions only). Do not add the same `-D` again through
+  `PLATFORMIO_BUILD_FLAGS`: gcc warns `redefined` and `-Werror` fails. Use
+  `PLATFORMIO_BUILD_UNFLAGS` to cancel the project value first (as the
+  `all-gestures-mask` CI variant does).
 - `PAJ_EXAMPLE_TRACE=1` in `examples/basic` is the bring-up harness: it prints
   the decoded gesture, `REG_STATE` (0x45), the ambiguous-read counter and the
   raw 0x93..0xCF register values after `paj_init()`. It is what identified the
   `0x3F` ambiguity and the untouched `0x93`/`0x94` on the bench.
+- **A reprinted `PAJ7620U2 gesture driver init...` banner means an MCU reset**,
+  not a driver re-init (that path prints `SENSOR HANG ... re-init`). The example
+  prints the RCC reset flags (`Reset: PIN POR ...`, ~276 B of flash,
+  `PAJ_EXAMPLE_RESET_INFO=0` removes it) and clears them. A brown-out from the
+  720…860 mA IR-LED pulses on a shared/weak rail is the usual cause; HardFault
+  would hang (`HardFault_Handler` is an endless loop), no watchdog is started,
+  and measured stack frames are tiny (`-fstack-usage`: ≤20 B in the driver,
+  `paj_exti_init` 48 B, `main` 36 B vs the 256 B linker stack). For a reset
+  **loop** build with `PAJ_EXAMPLE_POWER_TEST=1` (`pio run -e power_test
+  -t upload`): the example suspends the sensor (LED off, ~15 µA) and prints a
+  heartbeat only — if the reboots stop, the sensor's supply/LED current is the
+  fault, not the MCU. Confirmed on the bench: powering the module from the
+  WCH-Link 3.3 V pin (~100 mA) gives a POR loop after ~20 s of gestures, while
+  `power_test` ran 250+ heartbeats reset-free on the same board. The driver has
+  no lever to lower the LED current — this must be fixed in hardware.
 
 ## Datasheet sources
 

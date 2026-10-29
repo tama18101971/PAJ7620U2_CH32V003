@@ -17,7 +17,8 @@ Follows the sibling `APDS-9960_CH32V003` driver; keep the two diffable.
   - `g_last_i2c_status` is only ever written on a failed transaction.
 - **Static state**: file-scope `static` in `paj7620.c`
   (`g_bank`, `g_last_error`, `g_last_i2c_status`, `g_reinit_count`,
-  `g_gesture`/`g_has_gesture`, `g_cal_*`, `g_ticks_per_ms`). No globals in headers
+  `g_gesture`/`g_has_gesture`, `g_cal_*`, `g_ticks_per_ms`,
+  `g_enabled_mask1`/`g_enabled_wave`/`g_int_masks_on`). No globals in headers
   except the ISR-shared `g_paj_int_flag` (declared `extern volatile`).
 - **Register tables** are `static const uint8_t (*)[3]` of `{bank, reg, value}`
   taken verbatim from the datasheet, with 0xEF bank writes stripped

@@ -25,9 +25,10 @@ API новой библиотеки повторяет API старой, поэ�
 | `apds_getLastI2CStatus()` | `paj_getLastI2CStatus()` | Коды i2c.h те же |
 | `apds_getReinitCount()` | `paj_getReinitCount()` | Счётчик переинициализаций после сбоев I2C |
 | `apds_recalibrate()` | `paj_recalibrate()` | Калибрует пороги proximity |
-| `apds_enableInterrupt()` | `paj_enableInterrupt()` | Пишет маски `0x41`/`0x42` |
+| `apds_enableInterrupt()` | `paj_enableInterrupt()` | Пишет текущую маску жестов в `0x41`/`0x42` |
 | `apds_disableInterrupt()` | `paj_disableInterrupt()` | Обнуляет маски |
 | `apds_clearInterrupt()` | `paj_clearInterrupt()` | Снимает вывод INT (чтение флагов) |
+| — | `paj_setGestureMask()` / `paj_getGestureMask()` / `paj_isWaveEnabled()` | Новое: маска активных жестов в рантайме (см. §5.8) |
 | `int_config.h` → `apds_exti_init()` … | `paj_int_config.h` → `paj_exti_init()` … | Тот же вектор `EXTI7_0_IRQHandler`, тот же вывод PC3 |
 | `g_apds_int_flag` | `g_paj_int_flag` | Флаг ISR |
 
@@ -41,8 +42,9 @@ API новой библиотеки повторяет API старой, поэ�
 | Повторы | `APDS_RETRY_LIMIT` | `PAJ_RETRY_LIMIT` |
 | Отладка | `APDS9960_DEBUG` | `PAJ7620U2_DEBUG` |
 | Пороги proximity | `APDS_PROX_THRESHOLD`, `APDS_GESTURE_EXIT_TH` | `PAJ_PROX_THRESHOLD`, `PAJ_PROX_EXIT_TH` |
-| — | — | `PAJ_GESTURE_MASK`, `PAJ_WAVE_MASK`, `PAJ_PS_MASK` (новые) |
+| — | — | `PAJ_GESTURE_MASK`, `PAJ_WAVE_MASK`, `PAJ_PS_MASK` (новые; маска теперь фильтрует и программно) |
 | — | — | `PAJ_GESTURE_ROTATE` 0..3 (новое: повёрнутый модуль) |
+| — | — | `PAJ_ZDIR_THRESHOLD`, `PAJ_Z_OVERRIDES_XY` (новые: порог и приоритет Z-оси) |
 | — | — | `PAJ_ENABLE_PS_MODE` (новое: режим proximity) |
 
 Параметры APDS, не имеющие смысла для PAJ7620U2 (усиление/ток LED, пауза
@@ -62,7 +64,7 @@ gesture engine, пороги FIFO, фильтрация пакетов, чувс
 
 ```ini
 lib_deps =
-    https://github.com/tama18101971/PAJ7620U2_CH32V003.git#v1.1.1   ; было APDS-9960_CH32V003#v1.3.0
+    https://github.com/tama18101971/PAJ7620U2_CH32V003.git#v1.2.0   ; было APDS-9960_CH32V003#v1.3.0
     ...
 
 build_flags =
@@ -140,6 +142,30 @@ if (i2c_init(400000) == I2C_OK && CFG->on_gst) {
 7. **Повёрнутый модуль.** Если датчик установлен с наклоном 90/180/270°,
    задайте `PAJ_GESTURE_ROTATE=1..3`: драйвер переназначит направления
    программно, приложение продолжит получать физические направления.
+8. **Маска жестов действительно отключает жесты.** `REG_INT1_EN`/`REG_INT2_EN`
+   (`0x41`/`0x42`) управляют только выводом INT — чип продолжает выставлять
+   все флаги в `0x43`/`0x44`. Поэтому драйвер дополнительно вырезает
+   отключённые биты из прочитанных флагов: отключённый жест не декодируется,
+   не участвует в проверке противоречий и не отменяет разрешённый.
+   В рантайме маску меняет `paj_setGestureMask(PAJ_GESMASK_DIRECTIONS, false)`
+   (готовые наборы `PAJ_GESMASK_*` в `paj7620_config.h`); при сборке —
+   `-DPAJ_GESTURE_MASK=... -DPAJ_WAVE_MASK=...`. Смена маски сбрасывает
+   недособранный и готовый жест — не вызывайте её на каждом шаге цикла
+   (повторные вызовы с теми же значениями бесплатны).
+9. **Поведение фильтра под ладонь.** По умолчанию `PAJ_Z_OVERRIDES_XY=0`:
+   паразитный `Forward/Backward` (край широкой ладони) не отменяет начатый
+   боковой жест, а подтверждение бокового занимает 20 мс и завершается сразу,
+   как только датчик перестал выдавать направление; cooldown — 230 мс. Если в
+   проекте жесты делает палец и важен намеренный push/pull — соберите с
+   `-DPAJ_Z_OVERRIDES_XY=1`. Остаточные ложные Z-срабатывания убираются
+   повышением `PAJ_ZDIR_THRESHOLD` (`bank0 0x48`) до `0x48…0x55`.
+10. **Маска в сборке-примере уже сужена до 4 направлений.** `platformio.ini`
+    этого репозитория задаёт `-DPAJ_GESTURE_MASK=0x0F -DPAJ_WAVE_MASK=0`, и в
+    UART при старте печатается фактическая маска (`Gesture mask 0x0F, wave off`).
+    В своём проекте задавайте маску один раз: либо в его `build_flags`, либо
+    в рантайме через `paj_setGestureMask()`. Повторный `-D` того же макроса
+    даёт `warning: ... redefined`, а с `-Werror` — ошибку сборки; снимать
+    значение нужно через `build_unflags` / `PLATFORMIO_BUILD_UNFLAGS`.
 
 ## 6. Проверка после переноса
 
@@ -152,4 +178,4 @@ if (i2c_init(400000) == I2C_OK && CFG->on_gst) {
    распознаёт жесты (раздел 4).
 5. Сопоставить размер прошивки: при `-DPAJ_ENABLE_CALIBRATION=0` и без
    `printf` драйвер занимает около 2 КБ флэша и ~32 байта RAM с фильтром
-   (эталонная сборка `examples/basic` с LTO: RAM 528 Б, Flash 10992 Б).
+   (эталонная сборка `examples/basic` с LTO: RAM 528 Б, Flash 11108 Б).

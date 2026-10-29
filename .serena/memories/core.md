@@ -48,9 +48,14 @@ on the same pinout/API. Target of migration: `E:\GitProjects\DriverMD6`.
 
 ## Reference state
 
-GitHub `tama18101971/PAJ7620U2_CH32V003` (public, `main`), v1.1.1, MIT.
-CI: 10 jobs green — 9 build variants with `-Wextra -Werror` + size guard.
-Measured footprint (`examples/basic`, LTO on): RAM 528 B, Flash 10992 B
-(driver alone: 1427 B of `paj_*`/table symbols + 15 B bss; small helpers are
-partly inlined into their callers by LTO, so treat ~1.4–1.5 KB as the honest
-range).
+GitHub `tama18101971/PAJ7620U2_CH32V003` (public, `main`), v1.2.0, MIT.
+CI: 20 build variants with `-Wextra -Werror` + size guard.
+Measured footprint (`examples/basic`, LTO on, project mask 4 directions):
+RAM 528 B, Flash 11108 B (driver alone: ~1.4–1.6 KB of `paj_*`/table symbols +
+bss; small helpers are partly inlined into their callers by LTO).
+
+Gesture mask is set at build time (`PAJ_GESTURE_MASK`/`PAJ_WAVE_MASK` — the
+example's `platformio.ini` pins 4 directions, `PAJ_WAVE_MASK=0`) and at runtime
+(`paj_setGestureMask()`), and is enforced in software on the read flags
+(see `mem:driver/gesture_semantics`). Palm operation is the default
+(`PAJ_Z_OVERRIDES_XY=0`, confirm 20 ms, cooldown 230 ms).
