@@ -65,7 +65,7 @@ gesture engine, пороги FIFO, фильтрация пакетов, чувс
 
 ```ini
 lib_deps =
-    https://github.com/tama18101971/PAJ7620U2_CH32V003.git#v1.2.0   ; было APDS-9960_CH32V003#v1.3.0
+    https://github.com/tama18101971/PAJ7620U2_CH32V003.git#v1.2.1   ; было APDS-9960_CH32V003#v1.3.0
     ...
 
 build_flags =

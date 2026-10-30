@@ -1,6 +1,6 @@
 {
   "name": "PAJ7620U2_CH32V003",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Gesture driver for PAJ7620U2 on CH32V003 (NoneOS-SDK)",
   "frameworks": "noneos-sdk",
   "platforms": "ch32v",
