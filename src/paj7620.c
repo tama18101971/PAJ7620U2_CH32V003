@@ -78,9 +78,10 @@ static uint8_t  g_cal_valid;
 
 /* Число чтений с антагонистической парой флагов: датчик не выбрал
  * направление (например, одновременно Up и Down). Диагностика качества
- * сигнала через paj_getAmbiguousCount(). Считаются только пары по
- * РАЗРЕШЁННЫМ жестам: паразитная пара по отключённым (Forward|Backward при
- * проходе ладони) не должна выглядеть как проблема сигнала. */
+ * сигнала через paj_getAmbiguousCount(); счётчик насыщается на 255, не
+ * переполняясь. Считаются только пары по РАЗРЕШЁННЫМ жестам: паразитная
+ * пара по отключённым (Forward|Backward при проходе ладони) не должна
+ * выглядеть как проблема сигнала. */
 static uint8_t  g_ambiguous;
 
 /* Активная маска жестов (биты GES_*) и признак разрешения жеста WAVE.
@@ -195,6 +196,8 @@ static uint32_t udiv32_u16(uint32_t numerator, uint16_t denominator) {
  * PAJ_OWN_SYSTICK=1: драйвер на время цикла запускает SysTick сам
  * (CNT=0, CMP=max, счёт вверх от нуля, без прерывания) и внутри цикла
  * Delay_* НЕ вызывает — пауза между опросами флагов считается по CNT.
+ * По выходе из paj_readGesture() (любой путь) счётчик останавливается:
+ * timebase_stop() снимает STE, и свободный бег не переживает вызов.
  * Тактирование HCLK/8 (STCLK=0 после сброса) — та же посылка, что в
  * Delay_Init(): p_us = SystemCoreClock / 8000000.
  *
@@ -214,6 +217,16 @@ static void timebase_start(void) {
     SysTick->CMP  = 0xFFFFFFFFu;
     SysTick->CNT  = 0;
     SysTick->CTLR |= 1u;              /* STE=1: счёт вверх от нуля */
+}
+
+/* Остановить SysTick. Выполняется при каждом выходе из paj_readGesture():
+ * свободнобегущий счётчик (STE=1, CMP=0xFFFFFFFF) не должен переживать
+ * вызов — иначе приложение, использующее SysTick (в частности, с
+ * включённым STIE), получило бы неожидаемое срабатывание примерно через
+ * 2^32 тиков (~24 мин при 24 МГц и HCLK/8). CMP/CNT не восстанавливаются:
+ * Delay_Ms()/Delay_Us() SDK перезаписывают их при каждом вызове. */
+static void timebase_stop(void) {
+    SysTick->CTLR &= ~1u;             /* STE=0: счёт остановлен */
 }
 
 /* Подождать перехода к следующему опросу флагов.
@@ -347,12 +360,18 @@ static void wakeup_cmd(void) {
 /* Ожидание готовности датчика после wake-up.
  * Datasheet: T1 > 700 мкс (после питания), T2 > 400 мкс (после wake-up),
  * признак готовности — 0x20 в регистре 0x00 (банк 0).
+ * attempts — бюджет в номинальных итерациях по 1 мс: одна итерация
+ * включает I2C-транзакцию и на неработоспособной шине длится до её
+ * таймаута (I2C_TIMEOUT_MS), поэтому фактическое время ожидания больше
+ * номинального. Путь восстановления передаёт сокращённый бюджет
+ * PAJ_REINIT_WAKEUP_MS — он вызывается из номинально неблокирующих
+ * paj_available()/paj_readGesture().
  * NACK до окончания пробуждения — штатная ситуация и в диагностику не
  * попадает; прочие коды ошибок шины фиксируются.
  * Возвращает: true когда датчик готов. При 0xFF — PAJ_ERR_INVALID_ID,
- * по истечении таймаута — PAJ_ERR_SENSOR_HANG. */
-static bool wait_ready(void) {
-    for (uint8_t i = 0; i < PAJ_WAKEUP_TIMEOUT_MS; i++) {
+ * по истечении бюджета — PAJ_ERR_SENSOR_HANG. */
+static bool wait_ready(uint16_t attempts) {
+    for (uint16_t i = 0; i < attempts; i++) {
         uint8_t v;
         uint8_t st;
 
@@ -408,9 +427,15 @@ static bool write_int_masks(uint8_t m1, uint8_t m2) {
     return wr(PAJ_B0, REG_INT1_EN, m1) && wr(PAJ_B0, REG_INT2_EN, m2);
 }
 
-/* Маска REG_INT2_EN: wave включается в рантайме, PS — только конфигурацией. */
+/* Маска REG_INT2_EN для заданного бита wave: wave включается в рантайме,
+ * PS — только конфигурацией. */
+static uint8_t int2_mask_for(uint8_t wave) {
+    return (uint8_t)(wave | (uint8_t)(PAJ_PS_MASK ? INT2_PS_MASK : 0x00));
+}
+
+/* Маска REG_INT2_EN для текущего состояния драйвера. */
 static uint8_t int2_mask_on(void) {
-    return (uint8_t)(g_enabled_wave | (uint8_t)(PAJ_PS_MASK ? INT2_PS_MASK : 0x00));
+    return int2_mask_for(g_enabled_wave);
 }
 
 /* Маски прерываний, применяемые при инициализации датчика. */
@@ -466,7 +491,7 @@ static bool configure_sensor(void) {
 static bool sensor_reinit(void) {
     Delay_Ms(1);                 /* T1 > 700 мкс */
     wakeup_cmd();
-    if (!wait_ready()) {
+    if (!wait_ready(PAJ_REINIT_WAKEUP_MS)) {
         return false;
     }
     return configure_sensor();
@@ -648,7 +673,11 @@ static bool read_gesture_flags(uint8_t *f1, uint8_t *f2) {
 
     bad = contradictory_mask(*f1);
     if (bad != 0) {
-        g_ambiguous++;
+        /* Насыщение, а не переполнение: молчаливый wrap на 256-м событии
+         * обнулял бы счётчик и дискредитировал длительные измерения. */
+        if (g_ambiguous != 0xFFu) {
+            g_ambiguous++;
+        }
 #if PAJ_REJECT_AMBIGUOUS
         *f1 = (uint8_t)(*f1 & (uint8_t)~bad);
 #endif
@@ -917,7 +946,7 @@ bool paj_init(void) {
          * работала и на «тёплом» датчике. */
         Delay_Ms(1);
         wakeup_cmd();
-        if (!wait_ready()) {
+        if (!wait_ready(PAJ_WAKEUP_TIMEOUT_MS)) {
             /* Ответило не PAJ7620U2 — повтор не поможет, диагностика
              * должна остаться точной (PAJ_ERR_INVALID_ID), а не
              * превратиться в PAJ_ERR_SENSOR_HANG. */
@@ -972,7 +1001,7 @@ bool paj_wakeup(void) {
     g_bank = PAJ_BANK_UNKNOWN;
     Delay_Ms(1);
     wakeup_cmd();
-    if (!wait_ready()) {
+    if (!wait_ready(PAJ_WAKEUP_TIMEOUT_MS)) {
         /* Код ошибки уже выставлен: PAJ_ERR_INVALID_ID или PAJ_ERR_SENSOR_HANG */
         return false;
     }
@@ -1077,6 +1106,7 @@ bool paj_available(void) {
 
 gesture_t paj_readGesture(void) {
     g_last_error = PAJ_ERR_NONE;
+    gesture_t found = GESTURE_NONE;
 
 #if PAJ_OWN_SYSTICK
     timebase_start();
@@ -1088,7 +1118,8 @@ gesture_t paj_readGesture(void) {
         /* Жест, найденный paj_available() или paj_clearInterrupt(). */
         if (g_has_gesture) {
             g_has_gesture = 0;
-            return g_gesture;
+            found = g_gesture;
+            break;
         }
 
 #if PAJ_OWN_SYSTICK
@@ -1109,17 +1140,21 @@ gesture_t paj_readGesture(void) {
         if (!poll_gesture()) {
             g_last_error = PAJ_ERR_I2C;
             recover_sensor();
-            return GESTURE_NONE;
+            break;
         }
         if (g_has_gesture) {
             g_has_gesture = 0;
-            return g_gesture;
+            found = g_gesture;
+            break;
         }
 
         poll_delay();
     }
 
-    return GESTURE_NONE;
+#if PAJ_OWN_SYSTICK
+    timebase_stop();
+#endif
+    return found;
 }
 
 bool paj_readProximity(uint8_t *value) {
@@ -1161,8 +1196,8 @@ uint8_t paj_getAmbiguousCount(void) {
  * ============================================================================ */
 
 bool paj_setGestureMask(uint8_t mask1, bool enable_wave) {
-    bool unchanged = (mask1 == g_enabled_mask1) &&
-                     (enable_wave == (g_enabled_wave != 0));
+    const uint8_t wave = enable_wave ? (uint8_t)INT2_WAVE_FLAG : (uint8_t)0x00;
+    bool unchanged = (mask1 == g_enabled_mask1) && (wave == g_enabled_wave);
 
     /* Повторная установка той же маски не должна ни сбрасывать фильтр, ни
      * занимать шину: приложение может вызывать функцию в цикле настройки. */
@@ -1171,24 +1206,26 @@ bool paj_setGestureMask(uint8_t mask1, bool enable_wave) {
         return true;
     }
 
+    /* Аппаратные маски пишутся ДО фиксации нового значения в состоянии
+     * драйвера: при сбое записи датчик остаётся со старой маской, и драйвер
+     * остаётся на ней же — рассинхрон «программная маска новая, аппаратная
+     * старая» (лишние срабатывания INT) не возникает. */
+    if (g_int_masks_on) {
+        if (!write_int_masks(mask1, int2_mask_for(wave))) {
+            g_last_error = PAJ_ERR_I2C;
+            return false;
+        }
+    }
+
     g_enabled_mask1 = mask1;
-    g_enabled_wave  = enable_wave ? (uint8_t)INT2_WAVE_FLAG : (uint8_t)0x00;
+    g_enabled_wave  = wave;
 
     /* Смена маски обесценивает и недособранный кандидат, и готовый слот:
      * жест в нём мог быть получен по теперь отключённому флагу, а отдавать
-     * запрещённый жест нельзя. */
+     * запрещённый жест нельзя. Сброса при сбое записи выше не было: старая
+     * маска продолжает действовать, и накопленное состояние легитимно. */
     gesture_reset();
 
-    /* Прерывания выключены (polling-сборка или paj_disableInterrupt()) —
-     * пишем маску только в RAM, чтобы не включить вывод INT обратно. */
-    if (!g_int_masks_on) {
-        g_last_error = PAJ_ERR_NONE;
-        return true;
-    }
-    if (!apply_int_masks()) {
-        g_last_error = PAJ_ERR_I2C;
-        return false;
-    }
     g_last_error = PAJ_ERR_NONE;
     return true;
 }

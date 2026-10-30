@@ -119,7 +119,10 @@ C projects need an LSP backend; without one the symbol tools
   CW/CCW) still won `decode_gesture()` and could discard an enabled direction.
   `g_int_masks_on` remembers whether 0x41/0x42 currently hold real masks, so
   changing the mask never re-enables interrupts that `paj_disableInterrupt()`
-  (or a polling build) turned off.
+  (or a polling build) turned off. `paj_setGestureMask()` writes the hardware
+  masks **before** committing the new values to `g_enabled_mask1`/`g_enabled_wave`:
+  a failed write leaves sensor and driver consistent on the old mask (no
+  half-applied state, no `gesture_reset()` on the failure path).
 - **`paj_poll(now_ms)` is the recommended non-blocking path.** It reads flags
   at most every `PAJ_POLL_INTERVAL_MS` (5 ms), holds directional gestures for
   `PAJ_GESTURE_CONFIRM_MS` (20 ms), and applies `PAJ_GESTURE_COOLDOWN_MS`
@@ -175,10 +178,16 @@ C projects need an LSP backend; without one the symbol tools
   in the resume path — this is the single most common porting mistake
   (see INTEGRATION_RU.md §4).
 - **Sensor readiness**: after power-on (T1 > 700 µs) and after the wake-up
-  command, the sensor does not ACK until it is ready. `wait_ready()` polls
-  bank 0 register `0x00` for `0x20` and ignores expected NACKs; a readback of
-  `0xFF` means "something else answers at 0x73" → `PAJ_ERR_INVALID_ID`
-  (terminal, `paj_init()` does not retry it).
+  command, the sensor does not ACK until it is ready. `wait_ready(budget)`
+  polls bank 0 register `0x00` for `0x20` and ignores expected NACKs; a
+  readback of `0xFF` means "something else answers at 0x73" →
+  `PAJ_ERR_INVALID_ID` (terminal, `paj_init()` does not retry it). The budget
+  counts nominal 1 ms iterations, but each iteration holds an I2C transaction
+  that can run up to `I2C_TIMEOUT_MS` (40 ms) on a dead bus: `paj_init()` and
+  `paj_wakeup()` pass the full `PAJ_WAKEUP_TIMEOUT_MS` (20), the fault-recovery
+  path (`sensor_reinit()`, called from the nominally non-blocking
+  `paj_available()`/`paj_readGesture()`) passes the reduced
+  `PAJ_REINIT_WAKEUP_MS` (5) — worst fault-path call ≈ 0.4 s, not ≈ 1 s.
 - **Calibration does NOT run in `paj_init()`** (`PAJ_CALIBRATE_ON_INIT=0`,
   default). In gesture mode the sensor does not update `REG_PS_DATA` (0x6C),
   so the register returns a value that tracks ambient light rather than the
@@ -204,7 +213,10 @@ C projects need an LSP backend; without one the symbol tools
   sensor is busy with AE, or the transaction collides with the LED pulse);
   re-initialising on it costs milliseconds during which the sensor is silent
   and every gesture is lost — a self-inflicted instability. Below the
-  threshold the fault is only visible through `paj_getLastI2CStatus()`.
+  threshold the fault is only visible through `paj_getLastI2CStatus()`. The
+  re-init's readiness wait uses the reduced `PAJ_REINIT_WAKEUP_MS` budget (see
+  "Sensor readiness" above), so the recovery path cannot stall the caller for
+  the full wake-up timeout.
 - **Void-API interrupt functions** (`paj_enableInterrupt`,
   `paj_disableInterrupt`, `paj_clearInterrupt`) record `PAJ_ERR_I2C` on
   failure and never overwrite `g_last_error` on success.
@@ -220,7 +232,10 @@ C projects need an LSP backend; without one the symbol tools
 - `SysTick->CNT` counts UP on CH32V003, and NoneOS-SDK `Delay_Ms()`/`Delay_Us()`
   zero CNT and stop the counter after each call — SysTick is NOT a free-running
   timebase while `Delay_*` is in use. `paj_readGesture()` starts its own
-  SysTick when `PAJ_OWN_SYSTICK=1` and never calls `Delay_*` inside the loop.
+  SysTick when `PAJ_OWN_SYSTICK=1` and never calls `Delay_*` inside the loop;
+  `timebase_stop()` (STE=0) runs on every exit path, so the free-running
+  counter never survives the call (a stale CMP=0xFFFFFFFF would otherwise
+  fire an unexpected interrupt ~24 min later if the application had STIE set).
 - The PAJ7620U2 IR LED draws 720…860 mA pulses; VLED needs its own rail and
   local decoupling. Marginal sensor modules fail to detect fast gestures.
 - The sensor keeps only the LATEST gesture: polling slower than the gesture
@@ -235,7 +250,16 @@ C projects need an LSP backend; without one the symbol tools
 - `RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE)` must run before
   `GPIO_EXTILineConfig()`; otherwise the EXTI mapping is silently ignored.
 - The EXTI ISR in `paj_int_config.c` is intentionally **strong**: the
-  NoneOS-SDK weak fallback handler is an infinite loop.
+  NoneOS-SDK weak fallback handler is an infinite loop. Defining another
+  `EXTI7_0_IRQHandler` in the application is a duplicate-symbol link error —
+  use `paj_exti_callback()` or build with `PAJ_PROVIDE_EXTI_ISR=0`. The
+  strong handler snapshots `EXTI->INTFR & 0xFF` on entry and clears those
+  pending bits after the callback returns, so an unhandled foreign EXTI line
+  0..7 cannot loop the shared vector forever (that event is lost, the MCU is
+  not); a bit raised *during* the callback is outside the snapshot and
+  re-fires normally. `paj_exti_callback()` must fit within one I2C byte time
+  (~23 µs at 400 kHz — the I2C library's `I2C_ATOMIC_CRITICAL=0` contract);
+  long work goes behind a flag into the main loop.
 - Reference sizes (examples/basic, LTO on): RAM 528 B, Flash 11108 B. The
   driver itself is about 2 KB of flash and ~35 bytes of static RAM.
 - The example is built with `-DPAJ_GESTURE_MASK=0x0F -DPAJ_WAVE_MASK=0`

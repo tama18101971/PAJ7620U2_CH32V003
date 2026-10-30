@@ -219,13 +219,27 @@
 #define PAJ_WAKEUP_TIMEOUT_MS           20
 #endif
 
+/* Бюджет ожидания готовности датчика в ПУТИ ВОССТАНОВЛЕНИЯ после сбоев I2C
+ * (recover_sensor() -> sensor_reinit() -> wait_ready()), в номинальных
+ * итерациях по 1 мс. Одна итерация включает I2C-транзакцию, поэтому на
+ * физически неработоспособной шине она длится до таймаута I2C-библиотеки
+ * (I2C_TIMEOUT_MS, по умолчанию 40 мс): бюджет специально сокращён
+ * относительно PAJ_WAKEUP_TIMEOUT_MS, т.к. путь восстановления вызывается
+ * из номинально неблокирующих paj_available()/paj_readGesture() — при 5
+ * итерациях худший вызов занимает ~0.4 с вместо ~1 с при полном бюджете. */
+#ifndef PAJ_REINIT_WAKEUP_MS
+#define PAJ_REINIT_WAKEUP_MS            5
+#endif
+
 /* Максимальное время блокирующего ожидания жеста в paj_readGesture(), мс. */
 #ifndef PAJ_GESTURE_TIMEOUT_MS
 #define PAJ_GESTURE_TIMEOUT_MS          300
 #endif
 
 /* 1 (по умолчанию): на время paj_readGesture() драйвер конфигурирует SysTick
- * как свободнобегущий счётчик (HCLK/8) и обеспечивает настоящий дедлайн в мс.
+ * как свободнобегущий счётчик (HCLK/8) и обеспечивает настоящий дедлайн в мс;
+ * при каждом выходе из функции счётчик останавливается (STE=0), свободный
+ * бег не переживает вызов и не «выстреливает» позже неожидаемым прерыванием.
  * 0: драйвер не трогает SysTick вовсе — для приложений, использующих его
  * иначе (свой SysTick_Handler и т.п.). Цикл ограничивается бюджетом итераций,
  * каждая итерация содержит poll_delay(), поэтому таймаут не менее заданного. */
@@ -333,6 +347,9 @@
 #endif
 #if (PAJ_WAKEUP_TIMEOUT_MS < 1) || (PAJ_WAKEUP_TIMEOUT_MS > 1000)
 #error "PAJ_WAKEUP_TIMEOUT_MS must be in range 1..1000"
+#endif
+#if (PAJ_REINIT_WAKEUP_MS < 1) || (PAJ_REINIT_WAKEUP_MS > PAJ_WAKEUP_TIMEOUT_MS)
+#error "PAJ_REINIT_WAKEUP_MS must be in range 1..PAJ_WAKEUP_TIMEOUT_MS"
 #endif
 #if (PAJ_GESTURE_TIMEOUT_MS < 1) || (PAJ_GESTURE_TIMEOUT_MS > 1000)
 #error "PAJ_GESTURE_TIMEOUT_MS must be in range 1..1000"

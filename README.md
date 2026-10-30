@@ -89,6 +89,15 @@ loop must still call `paj_poll(now_ms)` regularly: subsequent calls complete the
 output, both modes, trace counters and a proximity demo lives in
 [examples/basic/main.c](examples/basic/main.c).
 
+All EXTI lines 0…7 on the CH32V003 share one vector. With the default
+`PAJ_PROVIDE_EXTI_ISR=1` the library owns the handler (defining your own is a
+duplicate-symbol link error): it clears pending bits of foreign lines captured
+on entry, so an unhandled foreign line cannot loop the vector forever — that
+event is lost, so poll your own lines at the start of `paj_exti_callback()`,
+which must fit within one I2C byte time (~23 µs at 400 kHz). For a fully custom
+handler build with `PAJ_PROVIDE_EXTI_ISR=0` and call `paj_handle_exti()` /
+`paj_clear_exti()` yourself.
+
 ## Enabling only the gestures you need
 
 ```c
@@ -134,8 +143,8 @@ values in `build_flags` with `PAJ_GESMASK_ALL` / `1` to re-enable everything.
 | `uint8_t paj_getLastError(void)` | `PAJ_ERR_NONE` / `I2C` / `SENSOR_HANG` / `INVALID_ID` / `UNSUPPORTED` |
 | `uint8_t paj_getLastI2CStatus(void)` | Raw status of the last failed I2C transaction |
 | `uint8_t paj_getReinitCount(void)` | Consecutive re-initialisations |
-| `uint8_t paj_getAmbiguousCount(void)` | Flag reads with no decisive direction (enabled gestures only) |
-| `bool paj_setGestureMask(uint8_t mask1, bool wave)` | Runtime gesture mask: filters flags and updates `0x41`/`0x42` |
+| `uint8_t paj_getAmbiguousCount(void)` | Flag reads with no decisive direction (enabled gestures only); saturates at 255 |
+| `bool paj_setGestureMask(uint8_t mask1, bool wave)` | Runtime gesture mask: filters flags and updates `0x41`/`0x42`; on an I2C failure the old mask stays in effect |
 | `uint8_t paj_getGestureMask(void)` / `bool paj_isWaveEnabled(void)` | Active mask / wave state |
 | `bool paj_recalibrate(void)` | Recompute proximity thresholds from sensor data |
 | `void paj_enableInterrupt(void)` / `void paj_disableInterrupt(void)` | Interrupt masks (0x41/0x42) from the active gesture mask |
@@ -169,12 +178,13 @@ separately).
 | `PAJ_GESTURE_COOLDOWN_MS` | `230` | Event suppression after publication; `0` disables it |
 | `PAJ_Z_OVERRIDES_XY` | `0` | `0` = palm (Z cannot cancel a direction), `1` = finger (Z wins) |
 | `PAJ_GESTURE_TIMEOUT_MS` | `300` | Blocking `paj_readGesture()` deadline |
-| `PAJ_WAKEUP_TIMEOUT_MS` | `20` | Sensor readiness timeout (T1 > 700 µs) |
-| `PAJ_OWN_SYSTICK` | `1` | `0` keeps the application SysTick untouched |
+| `PAJ_WAKEUP_TIMEOUT_MS` | `20` | Sensor readiness timeout (T1 > 700 µs), full budget for `paj_init()`/`paj_wakeup()` |
+| `PAJ_REINIT_WAKEUP_MS` | `5` | Reduced readiness budget for the fault-recovery path (keeps the nominal non-blocking calls bounded) |
+| `PAJ_OWN_SYSTICK` | `1` | `0` keeps the application SysTick untouched; with `1` the counter is stopped on every `paj_readGesture()` exit |
 | `PAJ_RETRY_LIMIT` | `6` | Init/re-init retry budget |
 | `PAJ_REINIT_THRESHOLD` | `3` | Consecutive I2C faults before a full re-init |
 | `PAJ_INT_MODE` | `1` | `0` = polling, `1` = interrupts at start-up |
-| `PAJ_PROVIDE_EXTI_ISR` | `1` | `0` = the application owns `EXTI7_0_IRQHandler` |
+| `PAJ_PROVIDE_EXTI_ISR` | `1` | `0` = the application owns `EXTI7_0_IRQHandler`; with `1` the library handler also clears foreign pending bits (anti-deadlock) |
 | `PAJ_ENABLE_PS_MODE` | `1` | `0` removes proximity mode (~250 B of flash) |
 | `PAJ_EXAMPLE_TRACE` | `0` | Diagnostic output in `examples/basic` |
 | `PAJ7620U2_DEBUG` | — | `-DPAJ7620U2_DEBUG` enables the driver's printf |
@@ -237,8 +247,11 @@ separately).
   re-initialisation (wake-up plus a complete register rewrite) runs after
   `PAJ_REINIT_THRESHOLD` consecutive faults, because the sensor does not answer
   during it and every gesture in that window is lost. After `PAJ_RETRY_LIMIT`
-  rounds the driver reports `PAJ_ERR_SENSOR_HANG`. A fault
-  during calibration is not fatal: the configured thresholds are kept.
+  rounds the driver reports `PAJ_ERR_SENSOR_HANG`. The re-init's readiness wait
+  uses the reduced `PAJ_REINIT_WAKEUP_MS` budget, so even a dead bus bounds the
+  worst fault-path call (~0.4 s at `I2C_TIMEOUT_MS=40`) instead of stalling for
+  the full wake-up timeout. A fault during calibration is not fatal: the
+  configured thresholds are kept.
 * **Power states.** `paj_shutdown()` enters suspend (IDD_SUS ≈ 15 µA) and
   requires `paj_wakeup()` (which performs the I2C wake-up) to resume.
   `paj_sleep()` is the cheaper option: configuration is retained.
@@ -255,7 +268,9 @@ separately).
   0 until `paj_setProximityMode()` is called.
 * `SysTick->CNT` is **not** a time base while `Delay_Ms()/Delay_Us()` are in
   use (they reset and stop the counter). `paj_readGesture()` either runs its
-  own SysTick (`PAJ_OWN_SYSTICK=1`) or uses an iteration budget (`=0`).
+  own SysTick (`PAJ_OWN_SYSTICK=1`) or uses an iteration budget (`=0`); with
+  `=1` the counter is stopped again on every exit, so the free-running state
+  never survives the call.
 * Debug output costs flash: `PAJ7620U2_DEBUG` pulls in `printf`.
 
 ## If the MCU reboots
